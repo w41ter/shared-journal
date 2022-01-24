@@ -17,8 +17,7 @@ mod mem;
 use async_trait::async_trait;
 use futures::Stream;
 
-use super::{proto::master as masterpb, Role, SegmentMeta};
-use crate::{Result, Sequence};
+use super::{Result, Role, SegmentMeta, Sequence};
 
 /// The state of an stream's observer. The transition of states is:
 ///

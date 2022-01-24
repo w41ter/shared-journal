@@ -20,9 +20,10 @@ mod master;
 mod orchestrator;
 mod proto;
 mod segment;
+mod server;
 mod stream;
 
-use self::proto::master as masterpb;
+use self::proto::{master as masterpb, server as serverpb};
 pub use self::{
     error::{Error, Result},
     journal::Role,
