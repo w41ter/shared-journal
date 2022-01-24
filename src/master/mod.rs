@@ -39,6 +39,17 @@ pub(super) enum ObserverState {
     Following,
 }
 
+impl ObserverState {
+    fn role(&self) -> crate::Role {
+        match self {
+            ObserverState::Following => crate::Role::Follower,
+            ObserverState::Leading | ObserverState::Recovering | ObserverState::Sealing => {
+                crate::Role::Leader
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 #[allow(dead_code)]
 pub(super) struct ObserverMeta {
@@ -61,6 +72,8 @@ pub(super) struct ObserverMeta {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum Command {
+    Nop,
+
     /// Promote the epoch and specify the new role. When receives `Promote`
     /// command, a leader must start to seal former epochs and recover the
     /// stream.
@@ -96,6 +109,19 @@ mod remote {
 
     use super::{mem::Client, SegmentMeta};
     use crate::{masterpb, Result};
+
+    impl From<masterpb::Command> for super::Command {
+        fn from(cmd: masterpb::Command) -> Self {
+            match masterpb::CommandType::from_i32(cmd.command_type) {
+                None | Some(masterpb::CommandType::Nop) => super::Command::Nop,
+                Some(masterpb::CommandType::Promote) => super::Command::Promote {
+                    role: cmd.role.into(),
+                    epoch: cmd.epoch,
+                    leader: cmd.leader,
+                },
+            }
+        }
+    }
 
     #[allow(dead_code)]
     pub(super) struct RemoteMaster {
@@ -133,7 +159,17 @@ mod remote {
             &self,
             observer_meta: super::ObserverMeta,
         ) -> Result<Vec<super::Command>> {
-            todo!()
+            let req = masterpb::HeartbeatRequest {
+                epoch: observer_meta.epoch,
+                observer_id: observer_meta.observer_id,
+                stream_name: observer_meta.stream_name,
+                role: observer_meta.state.role().into(),
+                observer_state: observer_meta.state.into(),
+                acked_seq: observer_meta.acked_seq,
+            };
+
+            let resp = self.master_client.heartbeat(req).await?;
+            Ok(resp.commands.into_iter().map(Into::into).collect())
         }
 
         async fn query_segments(
@@ -213,6 +249,38 @@ mod tests {
         let resp = master.get_segment("not-exists", 1).await?;
         assert!(matches!(resp, None));
 
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn heartbeat() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut segment_meta = HashMap::new();
+        segment_meta.insert("default".to_owned(), 1);
+
+        let replicas = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        let replicas_clone = replicas.clone();
+        let segment_meta_clone = segment_meta.clone();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let local_addr = listener.local_addr()?;
+        tokio::task::spawn(async {
+            let server = Server::new(segment_meta_clone, replicas_clone);
+            tonic::transport::Server::builder()
+                .add_service(server.into_service())
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+
+        let master = remote::RemoteMaster::new(&local_addr.to_string()).await?;
+        let observer_meta = ObserverMeta {
+            observer_id: "1".to_owned(),
+            stream_name: "default".to_owned(),
+            epoch: 1,
+            state: ObserverState::Leading,
+            acked_seq: (1 << 32),
+        };
+        master.heartbeat(observer_meta).await?;
         Ok(())
     }
 }
