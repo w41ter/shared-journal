@@ -93,13 +93,16 @@ impl Client {
         Ok(Client { client })
     }
 
-    async fn store(&self, input: serverpb::StoreRequest) -> crate::Result<serverpb::StoreResponse> {
+    pub async fn store(
+        &self,
+        input: serverpb::StoreRequest,
+    ) -> crate::Result<serverpb::StoreResponse> {
         let mut client = self.client.clone();
         let resp = client.store(input).await?;
         Ok(resp.into_inner())
     }
 
-    async fn read(
+    pub async fn read(
         &self,
         input: serverpb::ReadRequest,
     ) -> crate::Result<Streaming<serverpb::Entry>> {

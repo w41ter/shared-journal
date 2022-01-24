@@ -20,20 +20,125 @@
 //! guaranteed across segments.
 //!
 //! Entry sequence = (epoch << 32) | index of entry.
+
 use async_trait::async_trait;
+use futures::{StreamExt, TryStreamExt};
+use tonic::Streaming;
 
-use crate::{Entry, Result};
+use crate::{server::Client, serverpb, Entry, Result};
 
-#[async_trait]
-pub(super) trait SegmentReader {
-    /// Seeks to the given index in current segment.
-    async fn seek(&mut self, index: u32) -> Result<()>;
+#[allow(unused)]
+pub(crate) struct SegmentReader {
+    client: Client,
+    entries_stream: Streaming<serverpb::Entry>,
+}
 
+#[allow(dead_code)]
+impl SegmentReader {
+    fn new(client: Client, entries_stream: Streaming<serverpb::Entry>) -> Self {
+        SegmentReader {
+            client,
+            entries_stream,
+        }
+    }
+}
+
+#[allow(unused)]
+impl SegmentReader {
     /// Returns the next entry.
-    async fn try_next(&mut self) -> Result<Option<Entry>>;
+    pub async fn try_next(&mut self) -> Result<Option<Entry>> {
+        Ok(self.entries_stream.try_next().await?.map(Into::into))
+    }
 
     /// Returns the next entry or waits until it is available.
-    async fn watch_next(&mut self) -> Result<Entry>;
+    /// A None means that the stream has already terminated.
+    pub async fn watch_next(&mut self) -> Result<Option<Entry>> {
+        match self.entries_stream.next().await {
+            Some(r) => Ok(Some(r?.into())),
+            None => Ok(None),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SegmentReadPolicy {
+    Acked { start: u32, limit: u32 },
+    Pending,
+}
+
+enum SegmentClientOpt {
+    None,
+    Address(String),
+    Client(Client),
+}
+
+pub(crate) struct SegmentReaderBuilder {
+    stream_id: u64,
+    epoch: u32,
+
+    client: SegmentClientOpt,
+    read_policy: SegmentReadPolicy,
+}
+
+#[allow(dead_code)]
+impl SegmentReaderBuilder {
+    pub fn new(stream_id: u64, epoch: u32) -> Self {
+        SegmentReaderBuilder {
+            stream_id,
+            epoch,
+            client: SegmentClientOpt::None,
+            read_policy: SegmentReadPolicy::Pending,
+        }
+    }
+
+    /// Set remote address.
+    pub fn bind(mut self, addr: &str) -> Self {
+        self.client = SegmentClientOpt::Address(addr.to_owned());
+        self
+    }
+
+    /// Set segment client address.
+    pub fn set_client(mut self, client: Client) -> Self {
+        self.client = SegmentClientOpt::Client(client);
+        self
+    }
+
+    /// Seeks to the given index in this segment.
+    pub fn read_acked_entries(mut self, start: u32, limit: u32) -> Self {
+        self.read_policy = SegmentReadPolicy::Acked { start, limit };
+        self
+    }
+
+    /// Seeks to the first pending entry.
+    pub fn read_pending_entires(mut self) -> Self {
+        self.read_policy = SegmentReadPolicy::Pending;
+        self
+    }
+
+    pub async fn build(self) -> Result<SegmentReader> {
+        let client = match self.client {
+            SegmentClientOpt::None => panic!("Please setup the client address"),
+            SegmentClientOpt::Address(addr) => Client::connect(&addr).await?,
+            SegmentClientOpt::Client(client) => client,
+        };
+
+        let entries_stream = match self.read_policy {
+            SegmentReadPolicy::Acked { start, limit } => {
+                let req = serverpb::ReadRequest {
+                    stream_id: self.stream_id,
+                    seg_epoch: self.epoch,
+                    start_index: start,
+                    limit,
+                };
+                client.read(req).await?
+            }
+            SegmentReadPolicy::Pending => {
+                unimplemented!();
+            }
+        };
+
+        Ok(SegmentReader::new(client, entries_stream))
+    }
 }
 
 #[derive(Debug)]
