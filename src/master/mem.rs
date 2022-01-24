@@ -63,6 +63,13 @@ impl masterpb::master_server::Master for Server {
             None => Err(Status::not_found("no such stream exists")),
         }
     }
+
+    async fn heartbeat(
+        &self,
+        input: Request<masterpb::HeartbeatRequest>,
+    ) -> Result<Response<masterpb::HeartbeatResponse>, Status> {
+        todo!()
+    }
 }
 
 type MasterClient = masterpb::master_client::MasterClient<Channel>;
