@@ -1,0 +1,22 @@
+[package]
+name = "engula-shared-journal"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+homepage = "https://engula.io"
+description = "A stream storage implementations."
+
+[dependencies]
+async-trait = "0.1"
+futures = "0.3"
+prost = "0.9"
+thiserror = "1.0"
+tokio = { version = "1.13", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = "0.6"
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+tonic-build = "0.6"
