@@ -16,11 +16,13 @@
 
 mod error;
 mod journal;
+mod master;
 mod orchestrator;
 mod proto;
 mod segment;
 mod stream;
 
+use self::proto::master as masterpb;
 pub use self::{
     error::{Error, Result},
     journal::Role,
@@ -45,9 +47,11 @@ enum Entry {
 }
 
 /// `SegmentMeta` records the metadata for locating a segment and its data.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 struct SegmentMeta {
+    stream_id: u64,
+
     stream_name: String,
 
     /// A monotonic value in a stream. Allowing each segment's epoch value to be
