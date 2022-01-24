@@ -21,11 +21,10 @@
 //!
 //! Entry sequence = (epoch << 32) | index of entry.
 
-use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt};
 use tonic::Streaming;
 
-use crate::{server::Client, serverpb, Entry, Result};
+use crate::{server::Client, serverpb, Entry, Result, SegmentMeta};
 
 #[allow(unused)]
 pub(crate) struct SegmentReader {
@@ -149,19 +148,54 @@ pub struct WriteRequest {
     epoch: u32,
     /// The first index of entries.
     index: u32,
-    /// The index of acked entries which:
+    /// The sequence of acked entries which:
     ///  1. the number of replicas is satisfied replication policy.
     ///  2. all previous entries are acked.
-    acked: u32,
+    acked: u64,
     entries: Vec<Entry>,
 }
 
-#[async_trait]
-pub(super) trait SegmentWriter {
+pub(crate) struct SegmentWriter {
+    meta: SegmentMeta,
+    client: Client,
+}
+
+#[allow(dead_code)]
+impl SegmentWriter {
+    pub async fn new(meta: SegmentMeta, replica: String) -> Result<Self> {
+        let client = Client::connect(&replica).await?;
+        Ok(SegmentWriter { meta, client })
+    }
+}
+
+#[allow(dead_code, unused)]
+impl SegmentWriter {
     /// Seal the `store` operations of current segment, and any write operations
     /// issued with a small epoch will be rejected.
-    async fn seal(&self, new_epoch: u32) -> Result<()>;
+    pub async fn seal(&self, new_epoch: u32) -> Result<()> {
+        todo!()
+    }
 
     /// Store continuously entries with assigned index.
-    async fn store(&self, request: WriteRequest) -> Result<()>;
+    pub async fn store(&self, write: WriteRequest) -> Result<()> {
+        let events = write
+            .entries
+            .into_iter()
+            .filter_map(|e| match e {
+                Entry::Event { event, epoch } => Some(event.into()),
+                _ => None,
+            })
+            .collect();
+        let req = serverpb::StoreRequest {
+            stream_id: self.meta.stream_id,
+            seg_epoch: self.meta.epoch,
+            acked_seq: write.acked,
+            first_index: write.index,
+            epoch: write.epoch,
+            events,
+        };
+
+        self.client.store(req).await?;
+        Ok(())
+    }
 }
