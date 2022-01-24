@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 use tonic::{transport::Channel, Request, Response, Status};
 
-use super::masterpb;
+use crate::masterpb;
 
 struct MasterInner {
     stream_meta: HashMap<String, u64>,

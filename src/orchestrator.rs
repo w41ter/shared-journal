@@ -15,8 +15,7 @@
 use async_trait::async_trait;
 use futures::Stream;
 
-use super::{ReplicaMeta, SegmentMeta};
-use crate::Result;
+use crate::{ReplicaMeta, Result, SegmentMeta};
 
 /// A journal server instance abstraction.  The master needs to operate the
 /// journal server instance to get replica state, place or recycle replicas.

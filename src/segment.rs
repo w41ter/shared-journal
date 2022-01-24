@@ -22,8 +22,7 @@
 //! Entry sequence = (epoch << 32) | index of entry.
 use async_trait::async_trait;
 
-use super::Entry;
-use crate::Result;
+use crate::{Entry, Result};
 
 #[async_trait]
 pub(super) trait SegmentReader {
