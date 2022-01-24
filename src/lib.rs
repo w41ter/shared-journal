@@ -23,11 +23,14 @@ mod segment;
 mod server;
 mod stream;
 
-use self::proto::{master as masterpb, server as serverpb};
 pub use self::{
     error::{Error, Result},
     journal::Role,
     stream::{Sequence, StreamReader, StreamWriter},
+};
+use self::{
+    master::ObserverState,
+    proto::{master as masterpb, server as serverpb},
 };
 
 /// `Entry` is the minimum unit of the journal system. A continuous entries

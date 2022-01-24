@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::Entry;
+use super::{Entry, ObserverState, Role};
 
 pub mod server {
     tonic::include_proto!("engula.journal.v1.shared.server");
@@ -55,4 +55,44 @@ impl From<server::Entry> for Entry {
 
 pub mod master {
     tonic::include_proto!("engula.journal.v1.shared.master");
+}
+
+impl From<Role> for i32 {
+    fn from(role: Role) -> Self {
+        match role {
+            Role::Follower => master::Role::Follower as i32,
+            Role::Leader => master::Role::Leader as i32,
+        }
+    }
+}
+
+impl From<i32> for Role {
+    fn from(role: i32) -> Self {
+        match master::Role::from_i32(role) {
+            None | Some(master::Role::Follower) => Role::Follower,
+            Some(master::Role::Leader) => Role::Leader,
+        }
+    }
+}
+
+impl From<ObserverState> for i32 {
+    fn from(state: ObserverState) -> Self {
+        match state {
+            ObserverState::Following => master::ObserverState::Following as i32,
+            ObserverState::Sealing => master::ObserverState::Sealing as i32,
+            ObserverState::Recovering => master::ObserverState::Recovering as i32,
+            ObserverState::Leading => master::ObserverState::Leading as i32,
+        }
+    }
+}
+
+impl From<i32> for ObserverState {
+    fn from(state: i32) -> Self {
+        match master::ObserverState::from_i32(state) {
+            None | Some(master::ObserverState::Following) => ObserverState::Following,
+            Some(master::ObserverState::Sealing) => ObserverState::Sealing,
+            Some(master::ObserverState::Recovering) => ObserverState::Recovering,
+            Some(master::ObserverState::Leading) => ObserverState::Leading,
+        }
+    }
 }

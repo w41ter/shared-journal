@@ -16,9 +16,45 @@ syntax = "proto3";
 
 package engula.journal.v1.shared.master;
 
+// See src/master/mod.rs for details.
+enum ObserverState {
+    FOLLOWING = 0;
+    SEALING = 1;
+    RECOVERING = 2;
+    LEADING = 3;
+}
+
+// See src/journal.rs for details.
+enum Role {
+    FOLLOWER = 0;
+    LEADER = 1;
+}
+
+// Commands is supplied by master and complete by stream observers.
+enum CommandType {
+    NOP = 0;
+    PROMOTE = 1;
+}
+
+message Promote {
+    uint64 epoch = 1;
+    Role role = 2;
+    string leader = 3;
+}
+
+message Command {
+    CommandType command_type = 1;
+
+    Promote promote = 2;
+}
+
 service Master {
     // Get segment meta of the specified epoch of a stream.
     rpc GetSegment(GetSegmentRequest) returns (GetSegmentResponse);
+
+    // Sent heartbeat to master and receives commands which must complete by
+    // stream observers.
+    rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
 }
 
 message GetSegmentRequest {
@@ -32,4 +68,15 @@ message GetSegmentResponse {
     repeated string copy_set = 2;
 }
 
+message HeartbeatRequest {
+    string stream_name = 1;
+    uint64 epoch = 2;
+    Role role = 3;
 
+    string observer_id = 4;
+    string observer_state = 5;
+}
+
+message HeartbeatResponse {
+    repeated Command commands = 1;
+}
