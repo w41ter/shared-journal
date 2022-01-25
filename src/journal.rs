@@ -22,7 +22,7 @@ use futures::Stream;
 use crate::{Result, StreamReader, StreamWriter};
 
 /// The role of a stream.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum Role {
     /// A leader manipulate a stream.
