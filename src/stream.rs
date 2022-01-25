@@ -38,6 +38,163 @@ impl StreamReader {
     }
 }
 
+mod writer {
+    use std::collections::{HashMap, VecDeque};
+
+    use crate::Entry;
+
+    /// Store entries for a stream.
+    struct MemStorage {
+        epoch: u32,
+        first_index: u32,
+        entries: VecDeque<Entry>,
+    }
+
+    impl MemStorage {
+        fn new() -> Self {
+            MemStorage {
+                epoch: 0,
+                first_index: 0,
+                entries: VecDeque::new(),
+            }
+        }
+
+        /// Save entries and assign indexes.
+        fn append(&mut self, entries: Vec<Entry>) {
+            todo!();
+        }
+
+        /// Range values.
+        fn range(&self, r: std::ops::Range<u32>) -> Option<Vec<Entry>> {
+            None
+        }
+    }
+
+    struct Progress {
+        inflights: Vec<u32>,
+    }
+
+    enum Message {}
+
+    enum Command {
+        Tick,
+        Promote {
+            role: crate::Role,
+            epoch: u32,
+            leader: String,
+        },
+        Msg(Message),
+        Proposal(Entry),
+    }
+
+    struct Ready {
+        still_active: bool,
+    }
+
+    struct StreamStateMachine {
+        mem_store: MemStorage,
+        copy_set: HashMap<String, Progress>,
+    }
+
+    impl StreamStateMachine {
+        fn promote(&mut self, epoch: u32, role: crate::Role, leader: String) {}
+
+        fn step(&mut self, msg: Message) {}
+
+        fn propose(&mut self, entry: Entry) {}
+
+        fn advance(&mut self) -> Option<Ready> {
+            None
+        }
+    }
+
+    struct Channel {}
+
+    impl Channel {
+        fn fetch(&mut self) -> Vec<Command> {
+            todo!()
+        }
+
+        fn stream_id(&self) -> u64 {
+            0
+        }
+
+        fn sender(&mut self) -> () {
+            todo!()
+        }
+    }
+
+    struct Selector {}
+
+    impl Selector {
+        fn select(&mut self, consumed: &Vec<Channel>) -> Vec<Channel> {
+            todo!()
+        }
+    }
+
+    fn flush_messages(channel: &mut Channel, ready: &mut Ready) {
+        todo!();
+    }
+
+    fn send_heartbeat(stream: &mut StreamStateMachine) {
+        todo!()
+    }
+
+    struct Worker {
+        selector: Selector,
+        streams: HashMap<u64, StreamStateMachine>,
+    }
+
+    impl Worker {
+        fn new() -> Self {
+            Worker {
+                selector: Selector {},
+                streams: HashMap::new(),
+            }
+        }
+    }
+
+    async fn order_worker() {
+        let mut w = Worker::new();
+        let mut consumed: Vec<Channel> = Vec::new();
+
+        loop {
+            // Read entries from fired channels.
+            let actives = w.selector.select(&consumed);
+            for mut channel in actives {
+                let commands = channel.fetch();
+                let stream_id = channel.stream_id();
+                let stream = w
+                    .streams
+                    .get_mut(&stream_id)
+                    .expect("stream already exists");
+
+                for cmd in commands {
+                    match cmd {
+                        Command::Msg(msg) => stream.step(msg),
+                        Command::Proposal(entry) => stream.propose(entry),
+                        Command::Tick => send_heartbeat(stream),
+                        Command::Promote {
+                            epoch,
+                            role,
+                            leader,
+                        } => stream.promote(epoch, role, leader),
+                    }
+                }
+
+                if let Some(mut ready) = stream.advance() {
+                    flush_messages(&mut channel, &mut ready);
+                    if ready.still_active {
+                        // TODO(w41ter) support still active
+                        continue;
+                    }
+                }
+                consumed.push(channel);
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct StreamWriter {}
 
