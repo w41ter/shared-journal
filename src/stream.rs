@@ -42,7 +42,7 @@ impl StreamReader {
 mod writer {
     use std::collections::{HashMap, VecDeque};
 
-    use crate::Entry;
+    use crate::{Entry, ObserverState, Role, Sequence};
 
     /// Store entries for a stream.
     struct MemStorage {
@@ -60,8 +60,13 @@ mod writer {
             }
         }
 
-        /// Save entries and assign indexes.
-        fn append(&mut self, entries: Vec<Entry>) {
+        /// Returns the index of last entry.
+        fn last_index(&self) -> u32 {
+            todo!()
+        }
+
+        /// Save entry and assign index.
+        fn append(&mut self, entry: Entry) -> Sequence {
             todo!();
         }
 
@@ -75,7 +80,28 @@ mod writer {
         inflights: Vec<u32>,
     }
 
-    enum Message {}
+    impl Progress {
+        /// Return which chunk needs to replicate to the target.
+        fn next_chunk(&self, last_index: u32) -> (u32, u32) {
+            todo!()
+        }
+    }
+
+    enum Message {
+        Store {
+            target: String,
+            seg_epoch: u32,
+            epoch: u32,
+            acked_seq: u64,
+            first_index: u32,
+            entries: Vec<Entry>,
+        },
+        Saved {
+            target: String,
+            epoch: u32,
+            index: u32,
+        },
+    }
 
     enum Command {
         Tick,
@@ -85,27 +111,110 @@ mod writer {
             leader: String,
         },
         Msg(Message),
-        Proposal(Entry),
+        Proposal(Box<[u8]>),
     }
 
+    enum Error {
+        NotLeader(String),
+    }
+
+    enum ReplicationPolicy {}
+
+    impl ReplicationPolicy {
+        fn advance(&self, progresses: &HashMap<String, Progress>) -> Sequence {
+            todo!();
+        }
+    }
+
+    #[derive(Default)]
     struct Ready {
         still_active: bool,
+
+        pending_messages: Vec<Message>,
     }
 
     struct StreamStateMachine {
+        epoch: u32,
+        role: Role,
+        leader: String,
+        state: ObserverState,
         mem_store: MemStorage,
         copy_set: HashMap<String, Progress>,
+        replication_policy: ReplicationPolicy,
+
+        acked_seq: Sequence,
+        ready: Ready,
     }
 
     impl StreamStateMachine {
-        fn promote(&mut self, epoch: u32, role: crate::Role, leader: String) {}
+        fn promote(&mut self, epoch: u32, role: Role, leader: String) {
+            todo!();
+        }
 
-        fn step(&mut self, msg: Message) {}
+        fn step(&mut self, msg: Message) {
+            match msg {
+                Message::Saved {
+                    target,
+                    epoch,
+                    index,
+                } => {
+                    // todo
+                }
+                Message::Store {
+                    target: _,
+                    epoch: _,
+                    seg_epoch: _,
+                    first_index: _,
+                    acked_seq: _,
+                    entries: _,
+                } => unreachable!(),
+            }
+        }
 
-        fn propose(&mut self, entry: Entry) {}
+        fn propose(&mut self, event: Box<[u8]>) -> Result<Sequence, Error> {
+            if self.role == Role::Follower {
+                Err(Error::NotLeader(self.leader.clone()))
+            } else {
+                let entry = Entry::Event {
+                    epoch: self.epoch,
+                    event,
+                };
+                Ok(self.mem_store.append(entry))
+            }
+        }
 
-        fn advance(&mut self) -> Option<Ready> {
-            None
+        fn collect(&mut self) -> Option<Ready> {
+            self.advance();
+            self.broadcast();
+            Some(std::mem::take(&mut self.ready))
+        }
+
+        fn advance(&mut self) {
+            self.acked_seq = self.replication_policy.advance(&mut self.copy_set);
+        }
+
+        fn broadcast(&mut self) {
+            let last_index = self.mem_store.last_index();
+            self.copy_set.iter_mut().for_each(|(server_id, progress)| {
+                let (start, end) = progress.next_chunk(last_index);
+                let entries = match self.mem_store.range(start..end) {
+                    Some(entries) => entries,
+                    None => return,
+                };
+                // TODO(w41ter) need broadcast acked sequence.
+                let msg = Message::Store {
+                    target: server_id.clone(),
+                    entries,
+                    seg_epoch: self.epoch,
+                    epoch: self.epoch,
+                    acked_seq: 0,
+                    first_index: start,
+                };
+                self.ready.pending_messages.push(msg);
+                if end <= last_index {
+                    self.ready.still_active = true;
+                }
+            });
         }
     }
 
@@ -173,7 +282,9 @@ mod writer {
                 for cmd in commands {
                     match cmd {
                         Command::Msg(msg) => stream.step(msg),
-                        Command::Proposal(entry) => stream.propose(entry),
+                        Command::Proposal(event) => {
+                            stream.propose(event);
+                        }
                         Command::Tick => send_heartbeat(stream),
                         Command::Promote {
                             epoch,
@@ -183,7 +294,7 @@ mod writer {
                     }
                 }
 
-                if let Some(mut ready) = stream.advance() {
+                if let Some(mut ready) = stream.collect() {
                     flush_messages(&mut channel, &mut ready);
                     if ready.still_active {
                         // TODO(w41ter) support still active
