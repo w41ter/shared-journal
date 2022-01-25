@@ -123,6 +123,29 @@ mod remote {
         }
     }
 
+    impl From<super::Command> for masterpb::Command {
+        fn from(cmd: super::Command) -> Self {
+            match cmd {
+                super::Command::Nop => masterpb::Command {
+                    command_type: masterpb::CommandType::Nop as i32,
+                    epoch: 0,
+                    role: crate::Role::Follower.into(),
+                    leader: "".into(),
+                },
+                super::Command::Promote {
+                    role,
+                    epoch,
+                    leader,
+                } => masterpb::Command {
+                    command_type: masterpb::CommandType::Promote as i32,
+                    epoch,
+                    role: role.into(),
+                    leader,
+                },
+            }
+        }
+    }
+
     #[allow(dead_code)]
     pub(super) struct RemoteMaster {
         master_client: Client,
@@ -281,6 +304,49 @@ mod tests {
             acked_seq: (1 << 32),
         };
         master.heartbeat(observer_meta).await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn heartbeat_with_threshold_switching(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut segment_meta = HashMap::new();
+        segment_meta.insert("default".to_owned(), 1);
+
+        let replicas = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        let replicas_clone = replicas.clone();
+        let segment_meta_clone = segment_meta.clone();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let local_addr = listener.local_addr()?;
+        tokio::task::spawn(async {
+            let server = Server::new(segment_meta_clone, replicas_clone);
+            tonic::transport::Server::builder()
+                .add_service(server.into_service())
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+
+        let master = remote::RemoteMaster::new(&local_addr.to_string()).await?;
+        let observer_meta = ObserverMeta {
+            observer_id: "1".to_owned(),
+            stream_name: "default".to_owned(),
+            epoch: 1,
+            state: ObserverState::Leading,
+            acked_seq: (1 << 32) | ((super::mem::DEFAULT_NUM_THRESHOLD + 1) as u64),
+        };
+        let commands = master.heartbeat(observer_meta).await?;
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(
+            &commands[0],
+            super::Command::Promote {
+                role,
+                epoch,
+                leader: _
+            }
+            if *epoch == 2 && *role == Role::Leader
+        ));
         Ok(())
     }
 }
