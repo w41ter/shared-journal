@@ -38,6 +38,7 @@ impl StreamReader {
     }
 }
 
+#[allow(unused, dead_code)]
 mod writer {
     use std::collections::{HashMap, VecDeque};
 
@@ -119,7 +120,7 @@ mod writer {
             0
         }
 
-        fn sender(&mut self) -> () {
+        fn sender(&mut self) {
             todo!()
         }
     }
@@ -127,7 +128,7 @@ mod writer {
     struct Selector {}
 
     impl Selector {
-        fn select(&mut self, consumed: &Vec<Channel>) -> Vec<Channel> {
+        fn select(&mut self, consumed: &[Channel]) -> Vec<Channel> {
             todo!()
         }
     }
