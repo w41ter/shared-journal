@@ -12,16 +12,42 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 use tonic::{transport::Channel, Request, Response, Status};
 
-use crate::masterpb;
+use super::ObserverMeta;
+use crate::{masterpb, Role};
+
+#[allow(unused)]
+struct ObserverInfo {
+    meta: ObserverMeta,
+    role: Role,
+    last_heartbeat: Instant,
+}
+
+#[allow(unused)]
+struct StreamInfo {
+    stream_id: u64,
+    stream_name: String,
+    observers: HashMap<String, ObserverInfo>,
+}
+
+impl StreamInfo {
+    fn new(stream_id: u64, stream_name: String) -> Self {
+        StreamInfo {
+            stream_id,
+            stream_name,
+            observers: HashMap::new(),
+        }
+    }
+}
 
 struct MasterInner {
     stream_meta: HashMap<String, u64>,
+    streams: HashMap<u64, StreamInfo>,
     replicas: Vec<String>,
 }
 
@@ -36,6 +62,7 @@ impl Server {
             inner: Arc::new(Mutex::new(MasterInner {
                 stream_meta,
                 replicas,
+                streams: HashMap::new(),
             })),
         }
     }
@@ -68,7 +95,37 @@ impl masterpb::master_server::Master for Server {
         &self,
         input: Request<masterpb::HeartbeatRequest>,
     ) -> Result<Response<masterpb::HeartbeatResponse>, Status> {
-        todo!()
+        let req = input.into_inner();
+        let stream_name = req.stream_name.clone();
+        let observer_id = req.observer_id.clone();
+        let observer_info = ObserverInfo {
+            meta: ObserverMeta {
+                stream_name: req.stream_name,
+                observer_id: req.observer_id,
+                state: req.observer_state.into(),
+                epoch: req.epoch,
+                acked_seq: req.acked_seq,
+            },
+            role: req.role.into(),
+            last_heartbeat: Instant::now(),
+        };
+
+        let mut inner = self.inner.lock().await;
+        let stream_id = match inner.stream_meta.get(&stream_name) {
+            Some(id) => *id,
+            None => return Err(Status::not_found("no such stream exists")),
+        };
+
+        let stream = inner
+            .streams
+            .entry(stream_id)
+            .or_insert_with(|| StreamInfo::new(stream_id, stream_name.clone()));
+
+        stream.observers.insert(observer_id, observer_info);
+
+        Ok(Response::new(masterpb::HeartbeatResponse {
+            commands: vec![],
+        }))
     }
 }
 
@@ -94,6 +151,15 @@ impl Client {
     ) -> crate::Result<masterpb::GetSegmentResponse> {
         let mut client = self.client.clone();
         let resp = client.get_segment(input).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn heartbeat(
+        &self,
+        input: masterpb::HeartbeatRequest,
+    ) -> crate::Result<masterpb::HeartbeatResponse> {
+        let mut client = self.client.clone();
+        let resp = client.heartbeat(input).await?;
         Ok(resp.into_inner())
     }
 }
