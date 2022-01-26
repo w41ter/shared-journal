@@ -114,7 +114,7 @@ mod tests {
     use tokio_stream::wrappers::TcpListenerStream;
 
     use super::*;
-    use crate::{serverpb::ReadRequest, Sequence};
+    use crate::{serverpb::ReadRequest, Entry, Sequence};
 
     fn encode(epoch: u32, index: u32) -> Sequence {
         ((epoch as u64) << 32) | (index as u64)
