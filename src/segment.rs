@@ -142,19 +142,20 @@ impl SegmentReaderBuilder {
 
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct WriteRequest {
+pub(crate) struct WriteRequest {
     /// The epoch of write request initiator, it's not always equal to segment's
     /// epoch.
-    epoch: u32,
+    pub epoch: u32,
     /// The first index of entries.
-    index: u32,
+    pub index: u32,
     /// The sequence of acked entries which:
     ///  1. the number of replicas is satisfied replication policy.
     ///  2. all previous entries are acked.
-    acked: u64,
-    entries: Vec<Entry>,
+    pub acked: u64,
+    pub entries: Vec<Entry>,
 }
 
+#[derive(Clone)]
 pub(crate) struct SegmentWriter {
     meta: SegmentMeta,
     client: Client,
@@ -178,21 +179,14 @@ impl SegmentWriter {
 
     /// Store continuously entries with assigned index.
     pub async fn store(&self, write: WriteRequest) -> Result<()> {
-        let events = write
-            .entries
-            .into_iter()
-            .filter_map(|e| match e {
-                Entry::Event { event, epoch } => Some(event.into()),
-                _ => None,
-            })
-            .collect();
+        let entries = write.entries.into_iter().map(Into::into).collect();
         let req = serverpb::StoreRequest {
             stream_id: self.meta.stream_id,
             seg_epoch: self.meta.epoch,
             acked_seq: write.acked,
             first_index: write.index,
             epoch: write.epoch,
-            events,
+            entries,
         };
 
         self.client.store(req).await?;
