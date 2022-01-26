@@ -90,6 +90,7 @@ name = "engula-shared-journal"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bitflags",
  "futures",
  "prost",
  "tempfile",

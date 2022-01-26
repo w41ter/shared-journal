@@ -42,7 +42,9 @@ impl StreamReader {
 mod writer {
     use std::collections::{HashMap, VecDeque};
 
-    use crate::Entry;
+    use bitflags::bitflags;
+
+    use crate::{Entry, ObserverState, Role, Sequence};
 
     /// Store entries for a stream.
     struct MemStorage {
@@ -60,8 +62,13 @@ mod writer {
             }
         }
 
-        /// Save entries and assign indexes.
-        fn append(&mut self, entries: Vec<Entry>) {
+        /// Returns the index of last entry.
+        fn last_index(&self) -> u32 {
+            todo!()
+        }
+
+        /// Save entry and assign index.
+        fn append(&mut self, entry: Entry) -> Sequence {
             todo!();
         }
 
@@ -71,11 +78,73 @@ mod writer {
         }
     }
 
+    /// An abstraction for a journal server to receive and persist entries.
+    ///
+    /// For now, let's assume that message passing is reliable.
     struct Progress {
-        inflights: Vec<u32>,
+        matched_index: u32,
+        next_index: u32,
+
+        start: usize,
+        size: usize,
+        in_flights: Vec<u32>,
     }
 
-    enum Message {}
+    impl Progress {
+        const WINDOW: usize = 128;
+
+        /// Return which chunk needs to replicate to the target.
+        fn next_chunk(&self, last_index: u32) -> (u32, u32) {
+            if self.size == Self::WINDOW {
+                (self.next_index, self.next_index)
+            } else if last_index > self.next_index {
+                (self.next_index, last_index)
+            } else {
+                (last_index, last_index)
+            }
+        }
+
+        fn replicate(&mut self, next_index: u32) {
+            debug_assert!(self.size < Self::WINDOW);
+            debug_assert!(self.next_index < next_index);
+            self.next_index = next_index;
+
+            let off = (self.start + self.size) % Self::WINDOW;
+            self.in_flights[off] = next_index;
+            self.size += 1;
+        }
+
+        /// A server has stored entries.
+        fn on_received(&mut self, epoch: u32, index: u32) -> bool {
+            // TODO(w41ter) check epoch
+            while self.size > 0 && self.in_flights[self.start] < index {
+                self.start = (self.start + 1) % Self::WINDOW;
+                self.size -= 1;
+            }
+            self.next_index = index + 1;
+            self.size < Self::WINDOW
+        }
+    }
+
+    /// An abstraction of data communication between `StreamStateMachine` and
+    /// journal servers.
+    enum Message {
+        /// Store entries to.
+        Store {
+            target: String,
+            seg_epoch: u32,
+            epoch: u32,
+            acked_seq: u64,
+            first_index: u32,
+            entries: Vec<Entry>,
+        },
+        /// The journal server have received store request.
+        Received {
+            target: String,
+            epoch: u32,
+            index: u32,
+        },
+    }
 
     enum Command {
         Tick,
@@ -85,27 +154,173 @@ mod writer {
             leader: String,
         },
         Msg(Message),
-        Proposal(Entry),
+        Proposal(Box<[u8]>),
     }
 
+    enum Error {
+        NotLeader(String),
+    }
+
+    enum ReplicationPolicy {}
+
+    impl ReplicationPolicy {
+        fn advance(&self, progresses: &HashMap<String, Progress>) -> Sequence {
+            todo!();
+        }
+    }
+
+    #[derive(Default)]
     struct Ready {
         still_active: bool,
+
+        pending_messages: Vec<Message>,
+    }
+
+    bitflags! {
+        struct Flags : u64 {
+            const NONE = 0;
+            const ACK_ADVANCED = 0x1;
+        }
     }
 
     struct StreamStateMachine {
+        epoch: u32,
+        role: Role,
+        leader: String,
+        state: ObserverState,
         mem_store: MemStorage,
         copy_set: HashMap<String, Progress>,
+        replication_policy: ReplicationPolicy,
+
+        acked_seq: Sequence,
+        ready: Ready,
+
+        flags: Flags,
     }
 
     impl StreamStateMachine {
-        fn promote(&mut self, epoch: u32, role: crate::Role, leader: String) {}
+        fn promote(&mut self, epoch: u32, role: Role, leader: String) {
+            todo!();
+        }
 
-        fn step(&mut self, msg: Message) {}
+        fn step(&mut self, msg: Message) {
+            match msg {
+                Message::Received {
+                    target,
+                    epoch,
+                    index,
+                } => self.handle_received(target, epoch, index),
+                Message::Store {
+                    target: _,
+                    epoch: _,
+                    seg_epoch: _,
+                    first_index: _,
+                    acked_seq: _,
+                    entries: _,
+                } => unreachable!(),
+            }
+        }
 
-        fn propose(&mut self, entry: Entry) {}
+        fn propose(&mut self, event: Box<[u8]>) -> Result<Sequence, Error> {
+            if self.role == Role::Follower {
+                Err(Error::NotLeader(self.leader.clone()))
+            } else {
+                let entry = Entry::Event {
+                    epoch: self.epoch,
+                    event,
+                };
+                Ok(self.mem_store.append(entry))
+            }
+        }
 
-        fn advance(&mut self) -> Option<Ready> {
-            None
+        fn collect(&mut self) -> Option<Ready> {
+            self.advance();
+            self.broadcast();
+            self.flags = Flags::NONE;
+            Some(std::mem::take(&mut self.ready))
+        }
+
+        fn advance(&mut self) {
+            let acked_seq = self.replication_policy.advance(&self.copy_set);
+            if self.acked_seq < acked_seq {
+                self.acked_seq = acked_seq;
+                self.flags |= Flags::ACK_ADVANCED;
+            }
+        }
+
+        fn broadcast(&mut self) {
+            self.copy_set.iter_mut().for_each(|(server_id, progress)| {
+                Self::replicate(
+                    &mut self.ready,
+                    progress,
+                    &self.mem_store,
+                    self.epoch,
+                    self.acked_seq,
+                    server_id,
+                    self.flags.contains(Flags::ACK_ADVANCED),
+                );
+            });
+        }
+
+        fn replicate(
+            ready: &mut Ready,
+            progress: &mut Progress,
+            mem_store: &MemStorage,
+            epoch: u32,
+            acked_seq: u64,
+            server_id: &str,
+            bcast_acked_seq: bool,
+        ) {
+            let last_index = mem_store.last_index();
+            let (start, end) = progress.next_chunk(last_index);
+            let msg = match mem_store.range(start..end) {
+                Some(entries) => {
+                    /// Do not forward acked sequence to unmatched index.
+                    let matched_acked_seq =
+                        u64::min(acked_seq, (((epoch as u64) << 32) | (end - 1) as u64));
+                    Message::Store {
+                        target: server_id.to_owned(),
+                        entries,
+                        seg_epoch: epoch,
+                        epoch,
+                        acked_seq: matched_acked_seq,
+                        first_index: start,
+                    }
+                }
+                None if bcast_acked_seq => {
+                    // All entries are replicated, might broadcast acked
+                    // sequence.
+                    Message::Store {
+                        target: server_id.to_owned(),
+                        entries: vec![],
+                        seg_epoch: epoch,
+                        epoch,
+                        acked_seq,
+                        first_index: start,
+                    }
+                }
+                None => return,
+            };
+            ready.pending_messages.push(msg);
+            if end <= last_index {
+                ready.still_active = true;
+            }
+        }
+
+        fn handle_received(&mut self, target: String, epoch: u32, index: u32) {
+            if let Some(progress) = self.copy_set.get_mut(&target) {
+                if progress.on_received(epoch, index) {
+                    Self::replicate(
+                        &mut self.ready,
+                        progress,
+                        &self.mem_store,
+                        self.epoch,
+                        self.acked_seq,
+                        &target,
+                        true,
+                    );
+                }
+            }
         }
     }
 
@@ -173,7 +388,9 @@ mod writer {
                 for cmd in commands {
                     match cmd {
                         Command::Msg(msg) => stream.step(msg),
-                        Command::Proposal(entry) => stream.propose(entry),
+                        Command::Proposal(event) => {
+                            stream.propose(event);
+                        }
                         Command::Tick => send_heartbeat(stream),
                         Command::Promote {
                             epoch,
@@ -183,7 +400,7 @@ mod writer {
                     }
                 }
 
-                if let Some(mut ready) = stream.advance() {
+                if let Some(mut ready) = stream.collect() {
                     flush_messages(&mut channel, &mut ready);
                     if ready.still_active {
                         // TODO(w41ter) support still active
