@@ -68,17 +68,35 @@ mod writer {
 
         /// Returns the index of last entry.
         fn last_index(&self) -> u32 {
-            todo!()
+            self.first_index + self.entries.len() as u32
         }
 
         /// Save entry and assign index.
         fn append(&mut self, entry: Entry) -> Sequence {
-            todo!();
+            self.entries.push_back(entry);
+            let last_index = self.last_index();
+            (self.epoch as u64) << 32 | (last_index as u64)
         }
 
         /// Range values.
         fn range(&self, r: std::ops::Range<u32>) -> Option<Vec<Entry>> {
-            None
+            let last_index = self.last_index();
+            if self.first_index <= r.start && r.end <= last_index + 1 {
+                let start = (r.start - self.first_index) as usize;
+                let end = (r.end - self.first_index) as usize;
+                Some(self.entries.range(start..end).cloned().collect())
+            } else {
+                None
+            }
+        }
+
+        /// Drain useless entries
+        fn release(&mut self, until: u32) {
+            let last_index = self.last_index();
+            if self.first_index < until && until <= last_index {
+                let offset = until - self.first_index;
+                self.entries.drain(..offset as usize);
+            }
         }
     }
 
