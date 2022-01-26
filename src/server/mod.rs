@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 use tonic::{transport::Channel, Request, Response, Status, Streaming};
 
-use crate::{serverpb, Entry};
+use crate::serverpb;
 
 #[derive(Debug)]
 struct Server {
@@ -50,14 +50,8 @@ impl serverpb::shared_journal_server::SharedJournal for Server {
             req.seg_epoch,
             req.acked_seq,
             req.first_index,
-            req.events
-                .into_iter()
-                .map(|e| Entry::Event {
-                    epoch: req.epoch,
-                    event: e.into(),
-                })
-                .collect(),
-        )?;
+            req.entries.into_iter().map(Into::into).collect(),
+        );
         Ok(Response::new(serverpb::StoreResponse {}))
     }
 
@@ -120,10 +114,18 @@ mod tests {
     use tokio_stream::wrappers::TcpListenerStream;
 
     use super::*;
-    use crate::{serverpb::ReadRequest, Sequence};
+    use crate::{serverpb::ReadRequest, Entry, Sequence};
 
     fn encode(epoch: u32, index: u32) -> Sequence {
         ((epoch as u64) << 32) | (index as u64)
+    }
+
+    fn entry(event: Vec<u8>) -> serverpb::Entry {
+        serverpb::Entry {
+            entry_type: serverpb::EntryType::Event as i32,
+            epoch: 1,
+            event,
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -135,7 +137,7 @@ mod tests {
                 epoch: 1,
                 acked_seq: 0,
                 first_index: 0,
-                events: vec![vec![0u8], vec![2u8], vec![4u8]],
+                entries: vec![entry(vec![0u8]), entry(vec![2u8]), entry(vec![4u8])],
             },
             serverpb::StoreRequest {
                 stream_id: 1,
@@ -143,7 +145,7 @@ mod tests {
                 epoch: 1,
                 acked_seq: encode(1, 2),
                 first_index: 3,
-                events: vec![vec![6u8], vec![8u8]],
+                entries: vec![entry(vec![6u8]), entry(vec![8u8])],
             },
             serverpb::StoreRequest {
                 stream_id: 1,
@@ -151,7 +153,7 @@ mod tests {
                 epoch: 1,
                 acked_seq: encode(1, 4),
                 first_index: 5,
-                events: vec![],
+                entries: vec![],
             },
         ];
 

@@ -48,7 +48,11 @@ mod writer {
     use bitflags::bitflags;
     use tokio::sync::{Mutex, Notify};
 
-    use crate::{Entry, ObserverState, Role, Sequence};
+    use crate::{
+        segment::{SegmentWriter, WriteRequest},
+        server::Client,
+        serverpb, Entry, ObserverState, Role, Sequence,
+    };
 
     /// Store entries for a stream.
     struct MemStorage {
@@ -148,24 +152,26 @@ mod writer {
         }
     }
 
-    /// An abstraction of data communication between `StreamStateMachine` and
-    /// journal servers.
-    enum Message {
+    #[derive(Clone)]
+    enum MsgDetail {
         /// Store entries to.
         Store {
-            target: String,
-            seg_epoch: u32,
-            epoch: u32,
             acked_seq: u64,
             first_index: u32,
             entries: Vec<Entry>,
         },
         /// The journal server have received store request.
-        Received {
-            target: String,
-            epoch: u32,
-            index: u32,
-        },
+        Received { index: u32 },
+    }
+
+    /// An abstraction of data communication between `StreamStateMachine` and
+    /// journal servers.
+    #[derive(Clone)]
+    struct Message {
+        target: String,
+        seg_epoch: u32,
+        epoch: u32,
+        detail: MsgDetail,
     }
 
     enum Command {
@@ -226,16 +232,9 @@ mod writer {
         }
 
         fn step(&mut self, msg: Message) {
-            match msg {
-                Message::Received {
-                    target,
-                    epoch,
-                    index,
-                } => self.handle_received(target, epoch, index),
-                Message::Store {
-                    target: _,
-                    epoch: _,
-                    seg_epoch: _,
+            match msg.detail {
+                MsgDetail::Received { index } => self.handle_received(msg.target, msg.epoch, index),
+                MsgDetail::Store {
                     first_index: _,
                     acked_seq: _,
                     entries: _,
@@ -295,16 +294,13 @@ mod writer {
         ) {
             let last_index = mem_store.last_index();
             let (start, end) = progress.next_chunk(last_index);
-            let msg = match mem_store.range(start..end) {
+            let detail = match mem_store.range(start..end) {
                 Some(entries) => {
                     /// Do not forward acked sequence to unmatched index.
                     let matched_acked_seq =
                         u64::min(acked_seq, (((epoch as u64) << 32) | (end - 1) as u64));
-                    Message::Store {
-                        target: server_id.to_owned(),
+                    MsgDetail::Store {
                         entries,
-                        seg_epoch: epoch,
-                        epoch,
                         acked_seq: matched_acked_seq,
                         first_index: start,
                     }
@@ -312,17 +308,22 @@ mod writer {
                 None if bcast_acked_seq => {
                     // All entries are replicated, might broadcast acked
                     // sequence.
-                    Message::Store {
-                        target: server_id.to_owned(),
+                    MsgDetail::Store {
                         entries: vec![],
-                        seg_epoch: epoch,
-                        epoch,
                         acked_seq,
                         first_index: start,
                     }
                 }
                 None => return,
             };
+
+            let msg = Message {
+                target: server_id.to_owned(),
+                seg_epoch: epoch,
+                epoch,
+                detail,
+            };
+
             ready.pending_messages.push(msg);
             if end <= last_index {
                 ready.still_active = true;
@@ -453,8 +454,37 @@ mod writer {
         }
     }
 
-    fn flush_messages(channel: &mut Channel, ready: &mut Ready) {
-        todo!();
+    struct WriterGroup {
+        /// The epoch of segment this writer group belongs to.
+        epoch: u32,
+
+        writers: HashMap<String, SegmentWriter>,
+    }
+
+    fn flush_messages(writer_group: &WriterGroup, pending_messages: Vec<Message>) {
+        for msg in pending_messages {
+            if let MsgDetail::Store {
+                acked_seq,
+                first_index,
+                entries,
+            } = msg.detail
+            {
+                let writer = writer_group
+                    .writers
+                    .get(&msg.target)
+                    .expect("target not exists in copy group")
+                    .clone();
+                let write = WriteRequest {
+                    epoch: msg.epoch,
+                    index: first_index,
+                    acked: acked_seq,
+                    entries,
+                };
+                tokio::spawn(async move {
+                    writer.store(write).await;
+                });
+            }
+        }
     }
 
     fn send_heartbeat(stream: &mut StreamStateMachine) {
@@ -479,6 +509,7 @@ mod writer {
         let mut w = Worker::new();
         let mut consumed: Vec<Channel> = Vec::new();
         let mut streams: HashMap<u64, Channel> = HashMap::new();
+        let mut writer_groups: HashMap<u32, WriterGroup> = HashMap::new();
 
         loop {
             // Read entries from fired channels.
@@ -508,7 +539,10 @@ mod writer {
                 }
 
                 if let Some(mut ready) = stream.collect() {
-                    flush_messages(channel, &mut ready);
+                    let writer_group = writer_groups
+                        .get(&stream.epoch)
+                        .expect("writer group should exists");
+                    flush_messages(writer_group, ready.pending_messages);
                     if ready.still_active {
                         // TODO(w41ter) support still active
                         continue;

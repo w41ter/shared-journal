@@ -16,6 +16,18 @@ syntax = "proto3";
 
 package engula.journal.v1.shared.server;
 
+enum EntryType {
+    HOLE = 0;
+    EVENT = 1;
+    BRIDGE = 2;
+}
+
+message Entry {
+    EntryType entry_type = 1;
+    uint32 epoch = 2;
+    bytes event = 3;
+}
+
 service SharedJournal {
     // Store some continuous entries to a segment. This function will create
     // a new segment replica if it not exists.
@@ -39,7 +51,7 @@ message StoreRequest {
 
     uint32 first_index = 5;
 
-    repeated bytes events = 6;
+    repeated Entry entries = 6;
 }
 
 message StoreResponse {}
@@ -50,16 +62,4 @@ message ReadRequest {
 
     uint32 start_index = 3;
     uint32 limit = 4;
-}
-
-enum EntryType {
-    HOLE = 0;
-    EVENT = 1;
-    BRIDGE = 2;
-}
-
-message Entry {
-    EntryType entry_type = 1;
-    uint32 epoch = 2;
-    bytes event = 3;
 }
