@@ -40,9 +40,13 @@ impl StreamReader {
 
 #[allow(unused, dead_code)]
 mod writer {
-    use std::collections::{HashMap, VecDeque};
+    use std::{
+        collections::{HashMap, HashSet, VecDeque},
+        sync::Arc,
+    };
 
     use bitflags::bitflags;
+    use tokio::sync::{Mutex, Notify};
 
     use crate::{Entry, ObserverState, Role, Sequence};
 
@@ -324,27 +328,110 @@ mod writer {
         }
     }
 
-    struct Channel {}
+    struct ChannelState {
+        buf: VecDeque<Command>,
+        launcher: Option<Launcher>,
+    }
+
+    #[derive(Clone)]
+    struct Channel {
+        stream_id: u64,
+        state: Arc<Mutex<ChannelState>>,
+    }
 
     impl Channel {
-        fn fetch(&mut self) -> Vec<Command> {
-            todo!()
-        }
-
         fn stream_id(&self) -> u64 {
-            0
+            self.stream_id
         }
 
-        fn sender(&mut self) {
-            todo!()
+        async fn fetch(&self) -> Vec<Command> {
+            let mut state = self.state.lock().await;
+            std::mem::take(&mut state.buf).into_iter().collect()
+        }
+
+        async fn poll(&self, launcher: Launcher) {
+            let mut state = self.state.lock().await;
+            if state.buf.is_empty() {
+                state.launcher = Some(launcher);
+            } else {
+                drop(state);
+
+                launcher.fire(self.stream_id);
+            }
+        }
+
+        async fn send(&self, val: Command) {
+            if let Some(launcher) = {
+                let mut state = self.state.lock().await;
+
+                state.buf.push_back(val);
+                state.launcher.take()
+            } {
+                launcher.fire(self.stream_id);
+            };
         }
     }
 
-    struct Selector {}
+    #[derive(Clone)]
+    struct Launcher {
+        selector: Selector,
+    }
+
+    impl Launcher {
+        async fn fire(&self, stream_id: u64) {
+            let (lock, notify) = &*self.selector.inner;
+
+            let mut inner = lock.lock().await;
+            inner.actives.insert(stream_id);
+            if inner.wait {
+                inner.wait = false;
+                notify.notify_one();
+            }
+        }
+    }
+
+    struct SelectorState {
+        wait: bool,
+        actives: HashSet<u64>,
+    }
+
+    #[derive(Clone)]
+    struct Selector {
+        inner: Arc<(Mutex<SelectorState>, Notify)>,
+    }
 
     impl Selector {
-        fn select(&mut self, consumed: &[Channel]) -> Vec<Channel> {
-            todo!()
+        fn new() -> Self {
+            Selector {
+                inner: Arc::new((
+                    Mutex::new(SelectorState {
+                        wait: false,
+                        actives: HashSet::new(),
+                    }),
+                    Notify::new(),
+                )),
+            }
+        }
+
+        async fn select(&self, consumed: &[Channel]) -> Vec<u64> {
+            let launcher = Launcher {
+                selector: self.clone(),
+            };
+            for channel in consumed {
+                channel.poll(launcher.clone()).await;
+            }
+
+            let (lock, notify) = &*self.inner;
+            loop {
+                let mut inner = lock.lock().await;
+                if !inner.actives.is_empty() {
+                    inner.wait = true;
+                    drop(inner);
+                    notify.notified().await;
+                    continue;
+                }
+                return std::mem::take(&mut inner.actives).into_iter().collect();
+            }
         }
     }
 
@@ -364,7 +451,7 @@ mod writer {
     impl Worker {
         fn new() -> Self {
             Worker {
-                selector: Selector {},
+                selector: Selector::new(),
                 streams: HashMap::new(),
             }
         }
@@ -373,13 +460,15 @@ mod writer {
     async fn order_worker() {
         let mut w = Worker::new();
         let mut consumed: Vec<Channel> = Vec::new();
+        let mut streams: HashMap<u64, Channel> = HashMap::new();
 
         loop {
             // Read entries from fired channels.
-            let actives = w.selector.select(&consumed);
-            for mut channel in actives {
-                let commands = channel.fetch();
-                let stream_id = channel.stream_id();
+            let actives = w.selector.select(&consumed).await;
+            consumed.clear();
+            for mut stream_id in actives {
+                let channel = streams.get_mut(&stream_id).expect("");
+                let commands = channel.fetch().await;
                 let stream = w
                     .streams
                     .get_mut(&stream_id)
@@ -401,13 +490,13 @@ mod writer {
                 }
 
                 if let Some(mut ready) = stream.collect() {
-                    flush_messages(&mut channel, &mut ready);
+                    flush_messages(channel, &mut ready);
                     if ready.still_active {
                         // TODO(w41ter) support still active
                         continue;
                     }
                 }
-                consumed.push(channel);
+                consumed.push(channel.clone());
             }
         }
     }
