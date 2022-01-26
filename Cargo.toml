@@ -8,6 +8,7 @@ description = "A stream storage implementations."
 
 [dependencies]
 async-trait = "0.1"
+bitflags = "1.3.2"
 futures = "0.3"
 prost = "0.9"
 thiserror = "1.0"
