@@ -29,7 +29,7 @@ pub use self::{
     stream::{Sequence, StreamReader, StreamWriter},
 };
 use self::{
-    master::{ObserverMeta, ObserverState},
+    master::ObserverState,
     proto::{master as masterpb, server as serverpb},
 };
 
