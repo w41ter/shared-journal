@@ -701,18 +701,18 @@ mod writer {
             tokio::time::sleep(Duration::from_millis(5)).await;
             assert_eq!(channel.fetch().await.len(), 0);
 
-            tokio::time::sleep(Duration::from_millis(6)).await;
+            tokio::time::sleep(Duration::from_millis(8)).await;
             let cmds = channel.fetch().await;
             assert_eq!(cmds.len(), 1);
             assert!(matches!(cmds[0], Command::Tick));
 
-            tokio::time::sleep(Duration::from_millis(15)).await;
+            tokio::time::sleep(Duration::from_millis(12)).await;
             let cmds = channel.fetch().await;
             assert_eq!(cmds.len(), 1);
             assert!(matches!(cmds[0], Command::Tick));
 
             timer.unregister(channel.stream_id()).await;
-            tokio::time::sleep(Duration::from_millis(15)).await;
+            tokio::time::sleep(Duration::from_millis(12)).await;
             assert_eq!(channel.fetch().await.len(), 0);
         }
     }
