@@ -618,7 +618,7 @@ mod writer {
         /// The timestamp epoch since `ChannelTimer::baseline`.
         fn timestamp(&self) -> u64 {
             std::time::Instant::now()
-                .saturating_duration_since(self.baseline.clone())
+                .saturating_duration_since(self.baseline)
                 .as_millis() as u64
         }
     }
