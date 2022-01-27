@@ -183,12 +183,24 @@ enum Error {
 }
 
 #[allow(unused)]
-enum ReplicationPolicy {}
+enum ReplicationPolicy {
+    /// A simple strategy that allows ack entries as long as one copy holds the
+    /// dataset.
+    ///
+    /// This strategy is mainly used for testing.
+    Simple,
+}
 
 #[allow(unused)]
 impl ReplicationPolicy {
-    fn advance(&self, progresses: &HashMap<String, Progress>) -> Sequence {
-        todo!();
+    fn advance(&self, epoch: u32, progresses: &HashMap<String, Progress>) -> Sequence {
+        match self {
+            ReplicationPolicy::Simple => progresses
+                .iter()
+                .map(|(_, p)| (epoch as u64) << 32 | (p.matched_index as u64))
+                .max()
+                .unwrap_or_default(),
+        }
     }
 }
 
@@ -281,7 +293,7 @@ impl StreamStateMachine {
 
     fn advance(&mut self) {
         debug_assert_eq!(self.role, Role::Leader);
-        let acked_seq = self.replication_policy.advance(&self.copy_set);
+        let acked_seq = self.replication_policy.advance(self.epoch, &self.copy_set);
         if self.acked_seq < acked_seq {
             self.acked_seq = acked_seq;
             self.flags |= Flags::ACK_ADVANCED;
