@@ -29,7 +29,7 @@ pub use self::{
     stream::{Sequence, StreamReader, StreamWriter},
 };
 use self::{
-    master::ObserverState,
+    master::{ObserverMeta, ObserverState},
     proto::{master as masterpb, server as serverpb},
 };
 
@@ -53,7 +53,7 @@ enum Entry {
 /// `SegmentMeta` records the metadata for locating a segment and its data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
-struct SegmentMeta {
+pub struct SegmentMeta {
     stream_id: u64,
 
     stream_name: String,
