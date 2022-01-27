@@ -41,8 +41,11 @@ impl StreamReader {
 #[allow(unused, dead_code)]
 mod writer {
     use std::{
-        collections::{HashMap, HashSet, VecDeque},
+        cmp::Reverse,
+        collections::{BinaryHeap, HashMap, HashSet, VecDeque},
+        ops::Add,
         sync::Arc,
+        time::{Duration, Instant},
     };
 
     use bitflags::bitflags;
@@ -359,6 +362,16 @@ mod writer {
     }
 
     impl Channel {
+        fn new(stream_id: u64) -> Self {
+            Channel {
+                stream_id,
+                state: Arc::new(Mutex::new(ChannelState {
+                    buf: VecDeque::new(),
+                    launcher: None,
+                })),
+            }
+        }
+
         fn stream_id(&self) -> u64 {
             self.stream_id
         }
@@ -491,6 +504,125 @@ mod writer {
         todo!()
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    struct TimeEvent {
+        /// The timestamp epoch since `Timer::baseline`.
+        deadline_ms: u64,
+        stream_id: u64,
+    }
+
+    struct TimerState {
+        channels: HashMap<u64, Channel>,
+        heap: BinaryHeap<Reverse<TimeEvent>>,
+    }
+
+    /// A monotonically increasing timer.
+    ///
+    /// The smallest unit of time provided by the timer is milliseconds. The
+    /// object of registration timeout is channel, each channel only supports
+    /// registration once.
+    ///
+    /// FIXME(w41ter) This implementation needs improvement, as the underlying
+    /// clock is not guaranteed to be completely steady.
+    #[derive(Clone)]
+    struct ChannelTimer {
+        timeout_ms: u64,
+        baseline: Instant,
+        state: Arc<Mutex<TimerState>>,
+    }
+
+    impl ChannelTimer {
+        fn new(timeout_ms: u64) -> Self {
+            ChannelTimer {
+                timeout_ms,
+                baseline: Instant::now(),
+                state: Arc::new(Mutex::new(TimerState {
+                    channels: HashMap::new(),
+                    heap: BinaryHeap::new(),
+                })),
+            }
+        }
+
+        /// Register channel into timer. Panic if there already exists a same
+        /// channel.
+        async fn register(&self, channel: Channel) {
+            let mut state = self.state.lock().await;
+            let stream_id = channel.stream_id();
+            if state.channels.contains_key(&stream_id) {
+                drop(state);
+                panic!("duplicated register");
+            }
+
+            // FIXME(w41ter) shall we randomly shuffle deadlines?
+            let deadline_ms = self.timestamp() + self.timeout_ms;
+            state.channels.insert(stream_id, channel);
+            state.heap.push(Reverse(TimeEvent {
+                stream_id,
+                deadline_ms,
+            }));
+        }
+
+        /// Unregister channel from timer, do nothing if no such channel exists.
+        async fn unregister(&self, stream_id: u64) {
+            let mut state = self.state.lock().await;
+            state.channels.remove(&stream_id);
+        }
+
+        async fn run(&self) {
+            use tokio::time::{sleep_until, Instant as TokioInstant};
+
+            let mut next_deadline_ms: u64 = self.timeout_ms;
+            let mut fired_channels: Vec<Channel> = Vec::new();
+            loop {
+                sleep_until(TokioInstant::from_std(
+                    self.baseline.add(Duration::from_millis(next_deadline_ms)),
+                ))
+                .await;
+
+                {
+                    let mut state = self.state.lock().await;
+                    let now = self.timestamp();
+                    next_deadline_ms = now + self.timeout_ms;
+                    while let Some(event) = state.heap.peek() {
+                        let TimeEvent {
+                            mut deadline_ms,
+                            stream_id,
+                        } = event.0;
+                        if now < deadline_ms {
+                            next_deadline_ms = deadline_ms;
+                            break;
+                        }
+
+                        if let Some(channel) = state.channels.get(&stream_id) {
+                            // A channel might be fired multiple times if the calculated deadline
+                            // is still expired.
+                            fired_channels.push(channel.clone());
+                            deadline_ms += self.timeout_ms;
+                            state.heap.push(Reverse(TimeEvent {
+                                stream_id,
+                                deadline_ms,
+                            }));
+                        }
+
+                        state.heap.pop();
+                    }
+                }
+
+                for channel in &fired_channels {
+                    channel.send(Command::Tick).await;
+                }
+                fired_channels.clear();
+            }
+        }
+
+        /// The timestamp epoch since `ChannelTimer::baseline`.
+        fn timestamp(&self) -> u64 {
+            std::time::Instant::now()
+                .saturating_duration_since(self.baseline)
+                .as_millis() as u64
+        }
+    }
+
     struct Worker {
         selector: Selector,
         streams: HashMap<u64, StreamStateMachine>,
@@ -550,6 +682,33 @@ mod writer {
                 }
                 consumed.push(channel.clone());
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn channel_timer_timeout() {
+            let timer = ChannelTimer::new(100);
+            let bg_timer = timer.clone();
+            tokio::spawn(async move { bg_timer.run().await });
+
+            let channel = Channel::new(1);
+            timer.register(channel.clone()).await;
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(channel.fetch().await.len(), 0);
+
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            timer.unregister(channel.stream_id()).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+
+            let cmds = channel.fetch().await;
+            assert_eq!(cmds.len(), 2);
+            assert!(matches!(cmds[0], Command::Tick));
+            assert!(matches!(cmds[1], Command::Tick));
         }
     }
 }
