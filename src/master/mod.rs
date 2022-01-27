@@ -24,7 +24,7 @@ use super::{Result, Role, SegmentMeta, Sequence};
 /// Following -> Sealing -> Recovering -> Leading
 ///    ^                                    |
 ///    +------------------------------------+
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub(super) enum ObserverState {
     /// A leader must seals the former epochs before starting to recovery a
@@ -50,7 +50,7 @@ impl ObserverState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub(super) struct ObserverMeta {
     pub observer_id: String,
@@ -147,7 +147,8 @@ mod remote {
     }
 
     #[allow(dead_code)]
-    pub(super) struct RemoteMaster {
+    #[derive(Clone)]
+    pub struct RemoteMaster {
         master_client: Client,
     }
 
@@ -160,7 +161,7 @@ mod remote {
         }
     }
 
-    pub(super) struct MetaStream {}
+    pub struct MetaStream {}
 
     impl Stream for MetaStream {
         type Item = Result<SegmentMeta>;
@@ -350,3 +351,5 @@ mod tests {
         Ok(())
     }
 }
+
+pub use self::remote::{MetaStream, RemoteMaster};

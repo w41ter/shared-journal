@@ -52,9 +52,10 @@ mod writer {
     use tokio::sync::{Mutex, Notify};
 
     use crate::{
+        master::{Command as MasterCmd, Master, RemoteMaster},
         segment::{SegmentWriter, WriteRequest},
         server::Client,
-        serverpb, Entry, ObserverState, Role, Sequence,
+        serverpb, Entry, ObserverMeta, ObserverState, Role, Sequence,
     };
 
     /// Store entries for a stream.
@@ -215,6 +216,7 @@ mod writer {
     }
 
     struct StreamStateMachine {
+        name: String,
         epoch: u32,
         role: Role,
         leader: String,
@@ -500,8 +502,54 @@ mod writer {
         }
     }
 
-    fn send_heartbeat(stream: &mut StreamStateMachine) {
-        todo!()
+    async fn execute_master_commands(commands: Vec<MasterCmd>, channel: Channel) {
+        for cmd in commands {
+            match cmd {
+                MasterCmd::Promote {
+                    role,
+                    epoch,
+                    leader,
+                } => {
+                    channel
+                        .send(Command::Promote {
+                            role,
+                            epoch,
+                            leader,
+                        })
+                        .await;
+                }
+                MasterCmd::Nop => continue,
+            }
+        }
+    }
+
+    fn send_heartbeat<M>(
+        master: &M,
+        stream: &StreamStateMachine,
+        observer_id: String,
+        channel: Channel,
+    ) where
+        M: Master + Clone + Send + Sync + 'static,
+    {
+        let observer_meta = crate::master::ObserverMeta {
+            observer_id,
+            stream_name: stream.name.clone(),
+            epoch: stream.epoch,
+            state: stream.state,
+            acked_seq: stream.acked_seq,
+        };
+
+        let master_cloned = master.clone();
+        tokio::spawn(async move {
+            match master_cloned.heartbeat(observer_meta).await {
+                Ok(commands) => {
+                    execute_master_commands(commands, channel).await;
+                }
+                Err(error) => {
+                    todo!("log error message");
+                }
+            }
+        });
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -623,22 +671,31 @@ mod writer {
         }
     }
 
+    struct WorkerOption {
+        observer_id: String,
+        master: RemoteMaster,
+    }
+
     struct Worker {
+        observer_id: String,
         selector: Selector,
+        master: RemoteMaster,
         streams: HashMap<u64, StreamStateMachine>,
     }
 
     impl Worker {
-        fn new() -> Self {
+        fn new(opt: WorkerOption) -> Self {
             Worker {
+                observer_id: opt.observer_id,
+                master: opt.master,
                 selector: Selector::new(),
                 streams: HashMap::new(),
             }
         }
     }
 
-    async fn order_worker() {
-        let mut w = Worker::new();
+    async fn order_worker(opt: WorkerOption) {
+        let mut w = Worker::new(opt);
         let mut consumed: Vec<Channel> = Vec::new();
         let mut streams: HashMap<u64, Channel> = HashMap::new();
         let mut writer_groups: HashMap<u32, WriterGroup> = HashMap::new();
@@ -661,7 +718,12 @@ mod writer {
                         Command::Proposal(event) => {
                             stream.propose(event);
                         }
-                        Command::Tick => send_heartbeat(stream),
+                        Command::Tick => send_heartbeat(
+                            &w.master,
+                            stream,
+                            w.observer_id.clone(),
+                            channel.clone(),
+                        ),
                         Command::Promote {
                             epoch,
                             role,
