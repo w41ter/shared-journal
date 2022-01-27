@@ -465,13 +465,13 @@ struct SelectorState {
 
 #[derive(Clone)]
 #[allow(unused)]
-struct Selector {
+pub(crate) struct Selector {
     inner: Arc<(Mutex<SelectorState>, Notify)>,
 }
 
 #[allow(unused)]
 impl Selector {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Selector {
             inner: Arc::new((
                 Mutex::new(SelectorState {
@@ -724,9 +724,10 @@ impl ChannelTimer {
 }
 
 #[allow(unused)]
-pub struct WorkerOption {
+pub(crate) struct WorkerOption {
     pub observer_id: String,
     pub master: RemoteMaster,
+    pub selector: Selector,
 }
 
 #[allow(unused)]
@@ -743,14 +744,14 @@ impl Worker {
         Worker {
             observer_id: opt.observer_id,
             master: opt.master,
-            selector: Selector::new(),
+            selector: opt.selector,
             streams: HashMap::new(),
         }
     }
 }
 
 #[allow(unused)]
-pub async fn order_worker(opt: WorkerOption) {
+pub(crate) async fn order_worker(opt: WorkerOption) {
     let mut w = Worker::new(opt);
     let mut consumed: Vec<Channel> = Vec::new();
     let mut streams: HashMap<u64, Channel> = HashMap::new();
