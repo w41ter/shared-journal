@@ -691,19 +691,19 @@ mod writer {
 
         #[tokio::test(flavor = "multi_thread")]
         async fn channel_timer_timeout() {
-            let timer = ChannelTimer::new(10);
+            let timer = ChannelTimer::new(100);
             let bg_timer = timer.clone();
             tokio::spawn(async move { bg_timer.run().await });
 
             let channel = Channel::new(1);
             timer.register(channel.clone()).await;
 
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
             assert_eq!(channel.fetch().await.len(), 0);
 
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
             timer.unregister(channel.stream_id()).await;
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
 
             let cmds = channel.fetch().await;
             assert_eq!(cmds.len(), 2);
