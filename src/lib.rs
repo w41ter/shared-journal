@@ -25,7 +25,7 @@ mod stream;
 
 pub use self::{
     error::{Error, Result},
-    journal::Role,
+    journal::{build_journal, Journal, JournalOption, Role},
     stream::{Sequence, StreamReader, StreamWriter},
 };
 use self::{

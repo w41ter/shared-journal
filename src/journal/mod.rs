@@ -21,6 +21,7 @@ use std::{
 
 use futures::Stream;
 
+use self::worker::Selector;
 use crate::{Result, StreamReader, StreamWriter};
 
 /// The role of a stream.
@@ -69,8 +70,10 @@ impl Stream for EpochStateStream {
 
 /// A root structure of shared journal. This journal's streams divide time into
 /// epochs, and each epoch have at most one producer.
-#[derive(Debug)]
-pub struct Journal {}
+#[allow(unused)]
+pub struct Journal {
+    selector: Selector,
+}
 
 #[allow(dead_code, unused)]
 impl Journal {
@@ -118,5 +121,79 @@ impl Journal {
     /// Returns a stream writer.
     async fn new_stream_writer(&self, name: &str) -> Result<StreamWriter> {
         todo!();
+    }
+}
+
+#[derive(Debug, Clone)]
+#[allow(unused)]
+pub struct JournalOption {
+    /// The **unique** ID used to identify this client.
+    local_id: String,
+
+    /// The address descriptor of the master.
+    master_url: String,
+}
+
+/// Create and initialize a `Journal`, and start related asynchronous tasks.
+#[allow(unused)]
+pub async fn build_journal(opt: JournalOption) -> Result<Journal> {
+    use self::worker::WorkerOption;
+    use crate::master::RemoteMaster;
+
+    let master = RemoteMaster::new(&opt.master_url).await?;
+    let selector = Selector::new();
+    let worker_opt = WorkerOption {
+        observer_id: opt.local_id,
+        master,
+        selector: selector.clone(),
+    };
+
+    tokio::spawn(async move {
+        use self::worker::order_worker;
+
+        order_worker(worker_opt).await;
+    });
+
+    Ok(Journal { selector })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use tokio::net::TcpListener;
+    use tokio_stream::wrappers::TcpListenerStream;
+
+    use super::*;
+    use crate::master::mem::Server;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_journal_and_run() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut segment_meta = HashMap::new();
+        segment_meta.insert("default".to_owned(), 1);
+
+        let replicas = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        let replicas_clone = replicas.clone();
+        let segment_meta_clone = segment_meta.clone();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let local_addr = listener.local_addr()?;
+        tokio::task::spawn(async {
+            let server = Server::new(segment_meta_clone, replicas_clone);
+            tonic::transport::Server::builder()
+                .add_service(server.into_service())
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+
+        let opt = JournalOption {
+            local_id: "1".to_owned(),
+            master_url: local_addr.to_string(),
+        };
+        let journal = build_journal(opt).await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        drop(journal);
+        Ok(())
     }
 }

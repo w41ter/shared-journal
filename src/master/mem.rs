@@ -158,7 +158,7 @@ struct MasterInner {
     replicas: Vec<String>,
 }
 
-pub(super) struct Server {
+pub(crate) struct Server {
     inner: Arc<Mutex<MasterInner>>,
 }
 
