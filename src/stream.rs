@@ -66,9 +66,9 @@ mod writer {
     }
 
     impl MemStorage {
-        fn new() -> Self {
+        fn new(epoch: u32) -> Self {
             MemStorage {
-                epoch: 0,
+                epoch,
                 first_index: 0,
                 entries: VecDeque::new(),
             }
@@ -122,6 +122,16 @@ mod writer {
 
     impl Progress {
         const WINDOW: usize = 128;
+
+        fn new() -> Self {
+            Progress {
+                matched_index: 0,
+                next_index: 0,
+                start: 0,
+                size: 0,
+                in_flights: vec![0; Self::WINDOW],
+            }
+        }
 
         /// Return which chunk needs to replicate to the target.
         fn next_chunk(&self, last_index: u32) -> (u32, u32) {
@@ -184,6 +194,7 @@ mod writer {
             role: crate::Role,
             epoch: u32,
             leader: String,
+            copy_set: Vec<String>,
         },
         Msg(Message),
         Proposal(Box<[u8]>),
@@ -232,13 +243,28 @@ mod writer {
     }
 
     impl StreamStateMachine {
-        fn promote(&mut self, epoch: u32, role: Role, leader: String) {
-            todo!();
+        fn promote(&mut self, epoch: u32, role: Role, leader: String, copy_set: Vec<String>) {
+            self.epoch = epoch;
+            self.state = match role {
+                Role::Leader => ObserverState::Leading,
+                Role::Follower => ObserverState::Following,
+            };
+            self.mem_store = MemStorage::new(epoch);
+            self.copy_set = copy_set
+                .into_iter()
+                .map(|remote| (remote, Progress::new()))
+                .collect();
         }
 
         fn step(&mut self, msg: Message) {
             match msg.detail {
-                MsgDetail::Received { index } => self.handle_received(msg.target, msg.epoch, index),
+                MsgDetail::Received { index } => {
+                    if self.role == Role::Leader {
+                        self.handle_received(msg.target, msg.epoch, index);
+                    } else {
+                        todo!("log staled message");
+                    }
+                }
                 MsgDetail::Store {
                     first_index: _,
                     acked_seq: _,
@@ -260,13 +286,18 @@ mod writer {
         }
 
         fn collect(&mut self) -> Option<Ready> {
-            self.advance();
-            self.broadcast();
-            self.flags = Flags::NONE;
-            Some(std::mem::take(&mut self.ready))
+            if self.role == Role::Leader {
+                self.advance();
+                self.broadcast();
+                self.flags = Flags::NONE;
+                Some(std::mem::take(&mut self.ready))
+            } else {
+                None
+            }
         }
 
         fn advance(&mut self) {
+            debug_assert_eq!(self.role, Role::Leader);
             let acked_seq = self.replication_policy.advance(&self.copy_set);
             if self.acked_seq < acked_seq {
                 self.acked_seq = acked_seq;
@@ -275,6 +306,7 @@ mod writer {
         }
 
         fn broadcast(&mut self) {
+            debug_assert_eq!(self.role, Role::Leader);
             self.copy_set.iter_mut().for_each(|(server_id, progress)| {
                 Self::replicate(
                     &mut self.ready,
@@ -336,6 +368,7 @@ mod writer {
         }
 
         fn handle_received(&mut self, target: String, epoch: u32, index: u32) {
+            debug_assert_eq!(self.role, Role::Leader);
             if let Some(progress) = self.copy_set.get_mut(&target) {
                 if progress.on_received(epoch, index) {
                     Self::replicate(
@@ -502,24 +535,38 @@ mod writer {
         }
     }
 
-    async fn execute_master_commands(commands: Vec<MasterCmd>, channel: Channel) {
-        for cmd in commands {
-            match cmd {
-                MasterCmd::Promote {
-                    role,
-                    epoch,
-                    leader,
-                } => {
+    async fn execute_master_command<M>(
+        master: &M,
+        stream_name: &str,
+        channel: &Channel,
+        cmd: MasterCmd,
+    ) where
+        M: Master + Send + Sync + 'static,
+    {
+        match cmd {
+            MasterCmd::Promote {
+                role,
+                epoch,
+                leader,
+            } => match master.get_segment(stream_name, epoch).await {
+                Ok(Some(segment_meta)) => {
                     channel
                         .send(Command::Promote {
                             role,
                             epoch,
                             leader,
+                            copy_set: segment_meta.copy_set,
                         })
                         .await;
                 }
-                MasterCmd::Nop => continue,
-            }
+                _ => {
+                    // TODO(w41ter) handle error
+                    //  1. send heartbeat before get_segment
+                    //  2. get_segment failed
+                    todo!("log error message");
+                }
+            },
+            MasterCmd::Nop => {}
         }
     }
 
@@ -531,9 +578,10 @@ mod writer {
     ) where
         M: Master + Clone + Send + Sync + 'static,
     {
+        let stream_name = stream.name.clone();
         let observer_meta = crate::master::ObserverMeta {
             observer_id,
-            stream_name: stream.name.clone(),
+            stream_name: stream_name.clone(),
             epoch: stream.epoch,
             state: stream.state,
             acked_seq: stream.acked_seq,
@@ -543,7 +591,9 @@ mod writer {
         tokio::spawn(async move {
             match master_cloned.heartbeat(observer_meta).await {
                 Ok(commands) => {
-                    execute_master_commands(commands, channel).await;
+                    for cmd in commands {
+                        execute_master_command(&master_cloned, &stream_name, &channel, cmd).await;
+                    }
                 }
                 Err(error) => {
                     todo!("log error message");
@@ -728,7 +778,8 @@ mod writer {
                             epoch,
                             role,
                             leader,
-                        } => stream.promote(epoch, role, leader),
+                            copy_set,
+                        } => stream.promote(epoch, role, leader, copy_set),
                     }
                 }
 
