@@ -710,6 +710,7 @@ impl ChannelTimer {
     /// This function allows calling thread to sleep for an interval. It not
     /// guaranteed that always returns after the specified interval has been
     /// passed, because this call might be interrupted by a single handler.
+    #[cfg(target_os = "linux")]
     pub fn sleep(timeout_ms: u64) {
         use libc::{clock_nanosleep, CLOCK_MONOTONIC};
 
@@ -726,6 +727,12 @@ impl ChannelTimer {
                 _ => {}
             }
         }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn sleep(timeout_ms: u64) {
+        use std::time::Duration;
+        thread::sleep(Duration::from_millis(timeout_ms));
     }
 
     fn run(self) {
