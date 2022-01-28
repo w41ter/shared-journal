@@ -910,7 +910,6 @@ impl Worker {
             }
             self.consumed.push(channel.clone());
         }
-        todo!();
     }
 
     fn run(&mut self, exit_flag: Arc<AtomicBool>) {
@@ -918,6 +917,7 @@ impl Worker {
             // Read entries and actions from fired channels.
             let (actions, actives) = self.selector.select(&self.consumed);
             self.consumed.clear();
+            println!("found {} actions, {} actives", actions.len(), actives.len());
 
             self.execute_actions(actions);
             self.handle_active_channels(actives);

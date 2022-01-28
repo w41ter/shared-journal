@@ -261,7 +261,7 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use mem::Server;
+    use mem::{MasterConfig, Server};
     use tokio::net::TcpListener;
     use tokio_stream::wrappers::TcpListenerStream;
 
@@ -269,6 +269,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn get_segment() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let master_config = MasterConfig {
+            heartbeat_interval_ms: 10,
+            heartbeat_timeout_tick: 3,
+        };
         let mut segment_meta = HashMap::new();
         segment_meta.insert("default".to_owned(), 1);
 
@@ -279,7 +283,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let local_addr = listener.local_addr()?;
         tokio::task::spawn(async {
-            let server = Server::new(segment_meta_clone, replicas_clone);
+            let server = Server::new(master_config, segment_meta_clone, replicas_clone);
             tonic::transport::Server::builder()
                 .add_service(server.into_service())
                 .serve_with_incoming(TcpListenerStream::new(listener))
@@ -306,6 +310,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn heartbeat() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let master_config = MasterConfig {
+            heartbeat_interval_ms: 10,
+            heartbeat_timeout_tick: 3,
+        };
         let mut segment_meta = HashMap::new();
         segment_meta.insert("default".to_owned(), 1);
 
@@ -316,7 +324,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let local_addr = listener.local_addr()?;
         tokio::task::spawn(async {
-            let server = Server::new(segment_meta_clone, replicas_clone);
+            let server = Server::new(master_config, segment_meta_clone, replicas_clone);
             tonic::transport::Server::builder()
                 .add_service(server.into_service())
                 .serve_with_incoming(TcpListenerStream::new(listener))
@@ -339,6 +347,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn heartbeat_with_threshold_switching(
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let master_config = MasterConfig {
+            heartbeat_interval_ms: 10,
+            heartbeat_timeout_tick: 3,
+        };
         let mut segment_meta = HashMap::new();
         segment_meta.insert("default".to_owned(), 1);
 
@@ -349,7 +361,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let local_addr = listener.local_addr()?;
         tokio::task::spawn(async {
-            let server = Server::new(segment_meta_clone, replicas_clone);
+            let server = Server::new(master_config, segment_meta_clone, replicas_clone);
             tonic::transport::Server::builder()
                 .add_service(server.into_service())
                 .serve_with_incoming(TcpListenerStream::new(listener))
@@ -361,9 +373,9 @@ mod tests {
         let observer_meta = ObserverMeta {
             observer_id: "1".to_owned(),
             stream_name: "default".to_owned(),
-            epoch: 1,
+            epoch: 0,
             state: ObserverState::Leading,
-            acked_seq: (1 << 32) | ((super::mem::DEFAULT_NUM_THRESHOLD + 1) as u64),
+            acked_seq: (super::mem::DEFAULT_NUM_THRESHOLD + 1) as u64,
         };
         let commands = master.heartbeat(observer_meta).await?;
         assert_eq!(commands.len(), 1);
@@ -374,7 +386,7 @@ mod tests {
                 epoch,
                 leader: _
             }
-            if *epoch == 2 && *role == Role::Leader
+            if *epoch == 1 && *role == Role::Leader
         ));
         Ok(())
     }

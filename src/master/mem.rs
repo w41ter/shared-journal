@@ -12,7 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    ops::DerefMut,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
@@ -48,12 +53,7 @@ impl ThresholdSwitching {
         if let Role::Leader = applicant.role {
             if let Some(segment_info) = stream_info.segments.get(&stream_info.epoch) {
                 if segment_info.acked_index > DEFAULT_NUM_THRESHOLD {
-                    stream_info.epoch += 1;
-                    return Some(super::Command::Promote {
-                        role: Role::Leader,
-                        epoch: stream_info.epoch,
-                        leader: applicant.observer_id.clone(),
-                    });
+                    return Some(stream_info.reset_leader(applicant));
                 }
             }
         }
@@ -104,6 +104,7 @@ struct StreamInfo {
     switch_policy: Option<SwitchPolicy>,
 
     segments: HashMap<u32, SegmentInfo>,
+    leader: Option<String>,
     observers: HashMap<String, ObserverInfo>,
 }
 
@@ -116,6 +117,7 @@ impl StreamInfo {
             epoch: INITIAL_EPOCH,
             switch_policy: Some(SwitchPolicy::Threshold(ThresholdSwitching::new())),
             segments: HashMap::new(),
+            leader: None,
             observers: HashMap::new(),
         }
     }
@@ -136,9 +138,20 @@ impl StreamInfo {
         segment_info.epoch = acked_epoch;
         segment_info.acked_index = acked_index;
     }
+
+    fn reset_leader(&mut self, applicant: &PolicyApplicant) -> super::Command {
+        self.epoch += 1;
+        self.leader = Some(applicant.observer_id.clone());
+        super::Command::Promote {
+            role: Role::Leader,
+            epoch: self.epoch,
+            leader: applicant.observer_id.clone(),
+        }
+    }
 }
 
 fn apply_strategies(
+    config: &MasterConfig,
     applicant: &PolicyApplicant,
     stream_info: &mut StreamInfo,
 ) -> Vec<super::Command> {
@@ -147,10 +160,40 @@ fn apply_strategies(
             return vec![cmd];
         }
     }
+
+    // check leader
+    let now = Instant::now();
+    let select_new_leader = match &stream_info.leader {
+        Some(observer_id) => {
+            let observer_info = stream_info
+                .observers
+                .get(observer_id)
+                .expect("stream must exists if it is a leader");
+            // Leader might lost, need select new leader
+            observer_info.last_heartbeat + config.heartbeat_timeout() <= now
+        }
+        None => true,
+    };
+    if select_new_leader {
+        return vec![stream_info.reset_leader(applicant)];
+    }
     vec![]
 }
 
+#[derive(Debug, Clone)]
+pub struct MasterConfig {
+    pub heartbeat_timeout_tick: u64,
+    pub heartbeat_interval_ms: u64,
+}
+
+impl MasterConfig {
+    fn heartbeat_timeout(&self) -> Duration {
+        Duration::from_millis(self.heartbeat_timeout_tick * self.heartbeat_interval_ms)
+    }
+}
+
 struct MasterInner {
+    config: MasterConfig,
     stream_meta: HashMap<String, u64>,
     streams: HashMap<u64, StreamInfo>,
     replicas: Vec<String>,
@@ -162,18 +205,18 @@ pub(crate) struct Server {
 
 #[allow(dead_code)]
 impl Server {
-    pub fn new(stream_meta: HashMap<String, u64>, replicas: Vec<String>) -> Self {
+    pub fn new(
+        config: MasterConfig,
+        stream_meta: HashMap<String, u64>,
+        replicas: Vec<String>,
+    ) -> Self {
         let streams = stream_meta
             .iter()
-            .map(|(k, v)| {
-                // Temporary implementation.
-                let mut info = StreamInfo::new(*v, k.clone());
-                info.epoch = 1;
-                (*v, info)
-            })
+            .map(|(k, v)| (*v, StreamInfo::new(*v, k.clone())))
             .collect();
         Server {
             inner: Arc::new(Mutex::new(MasterInner {
+                config,
                 stream_meta,
                 replicas,
                 streams,
@@ -237,6 +280,7 @@ impl masterpb::master_server::Master for Server {
         };
 
         let mut inner = self.inner.lock().await;
+        let mut inner = inner.deref_mut();
         let stream_id = match inner.stream_meta.get(&stream_name) {
             Some(id) => *id,
             None => return Err(Status::not_found("no such stream exists")),
@@ -247,7 +291,7 @@ impl masterpb::master_server::Master for Server {
             .entry(stream_id)
             .or_insert_with(|| StreamInfo::new(stream_id, stream_name.clone()));
 
-        if stream.epoch < req.epoch {
+        if stream.epoch < req.epoch && stream.epoch != INITIAL_EPOCH {
             return Err(Status::aborted("too large epoch"));
         }
 
@@ -258,7 +302,7 @@ impl masterpb::master_server::Master for Server {
             role: req.role.into(),
             observer_id,
         };
-        let commands = apply_strategies(&applicant, stream);
+        let commands = apply_strategies(&inner.config, &applicant, stream);
         Ok(Response::new(masterpb::HeartbeatResponse {
             commands: commands.into_iter().map(Into::into).collect(),
         }))

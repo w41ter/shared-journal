@@ -246,11 +246,15 @@ mod tests {
     use tokio_stream::wrappers::TcpListenerStream;
 
     use super::*;
-    use crate::master::mem::Server;
+    use crate::master::mem::{MasterConfig, Server};
 
     type TResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
     async fn build_master(replicas: &[&str]) -> TResult<String> {
+        let master_config = MasterConfig {
+            heartbeat_interval_ms: 10,
+            heartbeat_timeout_tick: 3,
+        };
         let mut segment_meta = HashMap::new();
         segment_meta.insert("default".to_owned(), 1);
 
@@ -261,7 +265,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let local_addr = listener.local_addr()?;
         tokio::task::spawn(async {
-            let server = Server::new(segment_meta_clone, replicas_clone);
+            let server = Server::new(master_config, segment_meta_clone, replicas_clone);
             tonic::transport::Server::builder()
                 .add_service(server.into_service())
                 .serve_with_incoming(TcpListenerStream::new(listener))
