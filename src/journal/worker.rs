@@ -351,7 +351,6 @@ impl StreamStateMachine {
     ) {
         let next_index = mem_store.next_index();
         let (start, end) = progress.next_chunk(next_index);
-        println!("start {} end {}", start, end);
         let detail = match mem_store.range(start..end) {
             Some(entries) => {
                 /// Do not forward acked sequence to unmatched index.
@@ -455,8 +454,6 @@ impl Channel {
         if let Some(launcher) = {
             let mut state = self.state.lock().unwrap();
 
-            println!("submit 1 item, before is {}", state.buf.len());
-            println!("submit command: {:?}", val);
             state.buf.push_back(val);
             state.launcher.take()
         } {
@@ -562,6 +559,23 @@ struct WriterGroup {
     writers: HashMap<String, SegmentWriter>,
 }
 
+impl WriterGroup {
+    fn new(stream_id: u64, epoch: u32, copy_set: Vec<String>) -> Self {
+        WriterGroup {
+            epoch,
+            writers: copy_set
+                .into_iter()
+                .map(|replica| {
+                    (
+                        replica.clone(),
+                        SegmentWriter::new(stream_id, epoch, replica),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
 #[allow(unused)]
 fn flush_messages(
     runtime: &RuntimeHandle,
@@ -575,7 +589,7 @@ fn flush_messages(
             entries,
         } = msg.detail
         {
-            let writer = writer_group
+            let mut writer = writer_group
                 .writers
                 .get(&msg.target)
                 .expect("target not exists in copy group")
@@ -633,7 +647,6 @@ fn send_heartbeat<M>(
 ) where
     M: Master + Clone + Send + Sync + 'static,
 {
-    println!("send heartbeat");
     let stream_name = stream.name.clone();
     let observer_meta = crate::master::ObserverMeta {
         observer_id,
@@ -652,7 +665,6 @@ fn send_heartbeat<M>(
                 }
             }
             Err(error) => {
-                println!("error: {}", error);
                 todo!("log error message: {}", error);
             }
         }
@@ -793,7 +805,6 @@ impl ChannelTimer {
             }
 
             for channel in &fired_channels {
-                println!("submit tick to channel {}", channel.stream_id());
                 channel.submit(Command::Tick);
             }
             fired_channels.clear();
@@ -834,7 +845,7 @@ struct Worker {
 
     consumed: Vec<Channel>,
     streams: HashMap<u64, Channel>,
-    writer_groups: HashMap<u32, WriterGroup>,
+    writer_groups: HashMap<(u64, u32), WriterGroup>,
 }
 
 #[allow(unused)]
@@ -922,14 +933,22 @@ impl Worker {
                         role,
                         leader,
                         copy_set,
-                    } => state_machine.promote(epoch, role, leader, copy_set),
+                    } => {
+                        /// TODO(w41ter) since the epoch has already promoted,
+                        /// the former one needs to be gc.
+                        self.writer_groups.insert(
+                            (channel.stream_id(), epoch),
+                            WriterGroup::new(channel.stream_id(), epoch, copy_set.clone()),
+                        );
+                        state_machine.promote(epoch, role, leader, copy_set);
+                    }
                 }
             }
 
             if let Some(mut ready) = state_machine.collect() {
                 let writer_group = self
                     .writer_groups
-                    .get(&state_machine.epoch)
+                    .get(&(channel.stream_id(), state_machine.epoch))
                     .expect("writer group should exists");
                 flush_messages(&self.runtime_handle, writer_group, ready.pending_messages);
                 if ready.still_active {
@@ -946,7 +965,6 @@ impl Worker {
             // Read entries and actions from fired channels.
             let (actions, actives) = self.selector.select(&self.consumed);
             self.consumed.clear();
-            println!("found {} actions, {} actives", actions.len(), actives.len());
 
             self.execute_actions(actions);
             self.handle_active_channels(actives);
@@ -1068,7 +1086,6 @@ mod tests {
 
         for test in tests {
             let mut mem_store = MemStorage::new(1);
-            println!("test {:?}", test.range);
             for entry in test.entries {
                 mem_store.append(entry);
             }

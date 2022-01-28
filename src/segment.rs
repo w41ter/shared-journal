@@ -21,10 +21,16 @@
 //!
 //! Entry sequence = (epoch << 32) | index of entry.
 
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+
 use futures::{StreamExt, TryStreamExt};
+use lazy_static::lazy_static;
 use tonic::Streaming;
 
-use crate::{server::Client, serverpb, Entry, Result, SegmentMeta};
+use crate::{server::Client, serverpb, Entry, Result};
 
 #[allow(unused)]
 pub(crate) struct SegmentReader {
@@ -155,17 +161,27 @@ pub(crate) struct WriteRequest {
     pub entries: Vec<Entry>,
 }
 
+lazy_static! {
+    static ref CLIENTS: Arc<Mutex<HashMap<String, Client>>> = Arc::new(Mutex::new(HashMap::new()));
+}
+
 #[derive(Clone)]
 pub(crate) struct SegmentWriter {
-    meta: SegmentMeta,
-    client: Client,
+    stream_id: u64,
+    epoch: u32,
+    replica: String,
+    client: Option<Client>,
 }
 
 #[allow(dead_code)]
 impl SegmentWriter {
-    pub async fn new(meta: SegmentMeta, replica: String) -> Result<Self> {
-        let client = Client::connect(&replica).await?;
-        Ok(SegmentWriter { meta, client })
+    pub fn new(stream_id: u64, epoch: u32, replica: String) -> Self {
+        SegmentWriter {
+            stream_id,
+            epoch,
+            replica,
+            client: None,
+        }
     }
 }
 
@@ -178,18 +194,44 @@ impl SegmentWriter {
     }
 
     /// Store continuously entries with assigned index.
-    pub async fn store(&self, write: WriteRequest) -> Result<()> {
+    pub async fn store(&mut self, write: WriteRequest) -> Result<()> {
         let entries = write.entries.into_iter().map(Into::into).collect();
         let req = serverpb::StoreRequest {
-            stream_id: self.meta.stream_id,
-            seg_epoch: self.meta.epoch,
+            stream_id: self.stream_id,
+            seg_epoch: self.epoch,
             acked_seq: write.acked,
             first_index: write.index,
             epoch: write.epoch,
             entries,
         };
 
-        self.client.store(req).await?;
+        let client = self.get_client().await?;
+        client.store(req).await?;
+
         Ok(())
+    }
+
+    async fn get_client(&mut self) -> Result<&Client> {
+        if self.client.is_none() {
+            // 1. query local CLIENTS
+            {
+                let clients = CLIENTS.lock().unwrap();
+                match clients.get(&self.replica) {
+                    Some(client) => self.client = Some(client.clone()),
+                    None => {}
+                }
+            }
+
+            // 2. alloc new connection
+            if self.client.is_none() {
+                // FIXME(w41ter) too many concurrent connections.
+                let client = Client::connect(&self.replica).await?;
+                self.client = Some(client.clone());
+                let mut clients = CLIENTS.lock().unwrap();
+                clients.insert(self.replica.clone(), client);
+            }
+        }
+
+        Ok(self.client.as_ref().unwrap())
     }
 }

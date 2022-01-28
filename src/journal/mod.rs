@@ -290,4 +290,22 @@ mod tests {
         drop(journal);
         Ok(())
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stream_writer_append() -> TResult<()> {
+        let master_addr = build_master(&["a", "b", "c"]).await?;
+        let opt = JournalOption {
+            local_id: "1".to_owned(),
+            master_url: master_addr.to_string(),
+            heartbeat_interval: 10,
+        };
+        let mut journal = build_journal(opt).await?;
+        journal.subscribe_state("default").await?;
+
+        thread::sleep(Duration::from_millis(20));
+        let mut stream_writer = journal.new_stream_writer("default").await?;
+        stream_writer.append(vec![0u8; 1]).await?;
+
+        Ok(())
+    }
 }

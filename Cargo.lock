@@ -104,6 +104,7 @@ dependencies = [
  "bitflags",
  "derivative",
  "futures",
+ "lazy_static",
  "libc",
  "prost",
  "tempfile",
