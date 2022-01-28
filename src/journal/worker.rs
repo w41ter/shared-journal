@@ -15,18 +15,21 @@
 use std::{
     cmp::Reverse,
     collections::{BinaryHeap, HashMap, HashSet, VecDeque},
-    ops::Add,
-    sync::Arc,
-    time::{Duration, Instant},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Condvar, Mutex,
+    },
+    thread::{self, JoinHandle},
+    time::Instant,
 };
 
 use bitflags::bitflags;
-use tokio::sync::{Mutex, Notify};
+use futures::channel::oneshot;
 
 use crate::{
     master::{Command as MasterCmd, Master, RemoteMaster},
     segment::{SegmentWriter, WriteRequest},
-    Entry, ObserverState, Role, Sequence, INITIAL_EPOCH,
+    Entry, Error, ObserverState, Role, Sequence, INITIAL_EPOCH,
 };
 
 /// Store entries for a stream.
@@ -174,12 +177,10 @@ pub(crate) enum Command {
         copy_set: Vec<String>,
     },
     Msg(Message),
-    Proposal(Box<[u8]>),
-}
-
-#[allow(unused)]
-enum Error {
-    NotLeader(String),
+    Proposal {
+        event: Box<[u8]>,
+        sender: oneshot::Sender<Result<Sequence, Error>>,
+    },
 }
 
 #[allow(unused)]
@@ -421,17 +422,17 @@ impl Channel {
         }
     }
 
-    fn stream_id(&self) -> u64 {
+    pub fn stream_id(&self) -> u64 {
         self.stream_id
     }
 
-    async fn fetch(&self) -> Vec<Command> {
-        let mut state = self.state.lock().await;
+    fn fetch(&self) -> Vec<Command> {
+        let mut state = self.state.lock().unwrap();
         std::mem::take(&mut state.buf).into_iter().collect()
     }
 
-    async fn poll(&self, launcher: Launcher) {
-        let mut state = self.state.lock().await;
+    fn poll(&self, launcher: Launcher) {
+        let mut state = self.state.lock().unwrap();
         if state.buf.is_empty() {
             state.launcher = Some(launcher);
         } else {
@@ -441,9 +442,9 @@ impl Channel {
         }
     }
 
-    pub async fn send(&self, val: Command) {
+    pub fn submit(&self, val: Command) {
         if let Some(launcher) = {
-            let mut state = self.state.lock().await;
+            let mut state = self.state.lock().unwrap();
 
             state.buf.push_back(val);
             state.launcher.take()
@@ -461,14 +462,14 @@ struct Launcher {
 
 #[allow(unused)]
 impl Launcher {
-    async fn fire(&self, stream_id: u64) {
-        let (lock, notify) = &*self.selector.inner;
+    fn fire(&self, stream_id: u64) {
+        let (lock, cond) = &*self.selector.state;
 
-        let mut state = lock.lock().await;
+        let mut state = lock.lock().unwrap();
         state.actives.insert(stream_id);
         if state.wait {
             state.wait = false;
-            notify.notify_one();
+            cond.notify_one();
         }
     }
 }
@@ -491,56 +492,53 @@ struct SelectorState {
 #[derive(Clone)]
 #[allow(unused)]
 pub(crate) struct Selector {
-    inner: Arc<(Mutex<SelectorState>, Notify)>,
+    state: Arc<(Mutex<SelectorState>, Condvar)>,
 }
 
 #[allow(unused)]
 impl Selector {
     pub fn new() -> Self {
         Selector {
-            inner: Arc::new((
+            state: Arc::new((
                 Mutex::new(SelectorState {
                     wait: false,
                     actives: HashSet::new(),
                     actions: Vec::new(),
                 }),
-                Notify::new(),
+                Condvar::new(),
             )),
         }
     }
 
-    async fn select(&self, consumed: &[Channel]) -> (Vec<Action>, Vec<u64>) {
+    fn select(&self, consumed: &[Channel]) -> (Vec<Action>, Vec<u64>) {
         let launcher = Launcher {
             selector: self.clone(),
         };
         for channel in consumed {
-            channel.poll(launcher.clone()).await;
+            channel.poll(launcher.clone());
         }
 
-        let (lock, notify) = &*self.inner;
-        loop {
-            let mut state = lock.lock().await;
-            if state.actives.is_empty() && state.actions.is_empty() {
-                state.wait = true;
-                drop(state);
-                notify.notified().await;
-                continue;
-            }
-            return (
-                std::mem::take(&mut state.actions),
-                std::mem::take(&mut state.actives).into_iter().collect(),
-            );
+        let (lock, cond) = &*self.state;
+        let mut state = lock.lock().unwrap();
+        while state.actives.is_empty() && state.actions.is_empty() {
+            state.wait = true;
+            state = cond.wait(state).unwrap();
         }
+
+        (
+            std::mem::take(&mut state.actions),
+            std::mem::take(&mut state.actives).into_iter().collect(),
+        )
     }
 
     pub async fn execute(&self, act: Action) {
-        let (lock, notify) = &*self.inner;
+        let (lock, cond) = &*self.state;
 
-        let mut state = lock.lock().await;
+        let mut state = lock.lock().unwrap();
         state.actions.push(act);
         if state.wait {
             state.wait = false;
-            notify.notify_one();
+            cond.notify_one();
         }
     }
 }
@@ -592,14 +590,12 @@ where
             leader,
         } => match master.get_segment(stream_name, epoch).await {
             Ok(Some(segment_meta)) => {
-                channel
-                    .send(Command::Promote {
-                        role,
-                        epoch,
-                        leader,
-                        copy_set: segment_meta.copy_set,
-                    })
-                    .await;
+                channel.submit(Command::Promote {
+                    role,
+                    epoch,
+                    leader,
+                    copy_set: segment_meta.copy_set,
+                });
             }
             _ => {
                 // TODO(w41ter) handle error
@@ -667,7 +663,7 @@ struct TimerState {
 struct ChannelTimer {
     timeout_ms: u64,
     baseline: Instant,
-    state: Arc<Mutex<TimerState>>,
+    state: Arc<(Mutex<TimerState>, AtomicBool)>,
 }
 
 #[allow(unused)]
@@ -676,17 +672,20 @@ impl ChannelTimer {
         ChannelTimer {
             timeout_ms,
             baseline: Instant::now(),
-            state: Arc::new(Mutex::new(TimerState {
-                channels: HashMap::new(),
-                heap: BinaryHeap::new(),
-            })),
+            state: Arc::new((
+                Mutex::new(TimerState {
+                    channels: HashMap::new(),
+                    heap: BinaryHeap::new(),
+                }),
+                AtomicBool::new(false),
+            )),
         }
     }
 
     /// Register channel into timer. Panic if there already exists a same
     /// channel.
-    async fn register(&self, channel: Channel) {
-        let mut state = self.state.lock().await;
+    fn register(&self, channel: Channel) {
+        let mut state = self.state.0.lock().unwrap();
         let stream_id = channel.stream_id();
         if state.channels.contains_key(&stream_id) {
             drop(state);
@@ -703,33 +702,49 @@ impl ChannelTimer {
     }
 
     /// Unregister channel from timer, do nothing if no such channel exists.
-    async fn unregister(&self, stream_id: u64) {
-        let mut state = self.state.lock().await;
+    fn unregister(&self, stream_id: u64) {
+        let mut state = self.state.0.lock().unwrap();
         state.channels.remove(&stream_id);
     }
 
-    async fn run(&self) {
-        use tokio::time::{sleep_until, Instant as TokioInstant};
+    /// This function allows calling thread to sleep for an interval. It not
+    /// guaranteed that always returns after the specified interval has been
+    /// passed, because this call might be interrupted by a single handler.
+    pub fn sleep(timeout_ms: u64) {
+        use libc::{clock_nanosleep, CLOCK_MONOTONIC};
 
-        let mut next_deadline_ms: u64 = self.timeout_ms;
+        let (sec, ms) = (timeout_ms / 1000, timeout_ms % 1000);
+        let mut ts = libc::timespec {
+            tv_sec: sec as i64,
+            tv_nsec: (ms * 1000000) as i64,
+        };
+        unsafe {
+            match clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, std::ptr::null_mut()) {
+                x if x < 0 && x != libc::EINTR => {
+                    panic!("clock_nanosleep error code: {}", x);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn run(self) {
+        let mut next_timeout_ms: u64 = self.timeout_ms;
         let mut fired_channels: Vec<Channel> = Vec::new();
-        loop {
-            sleep_until(TokioInstant::from_std(
-                self.baseline.add(Duration::from_millis(next_deadline_ms)),
-            ))
-            .await;
+        while !self.state.1.load(Ordering::Acquire) {
+            Self::sleep(next_timeout_ms);
 
             {
-                let mut state = self.state.lock().await;
+                let mut state = self.state.0.lock().unwrap();
                 let now = self.timestamp();
-                next_deadline_ms = now + self.timeout_ms;
+                next_timeout_ms = self.timeout_ms;
                 while let Some(event) = state.heap.peek() {
                     let TimeEvent {
                         mut deadline_ms,
                         stream_id,
                     } = event.0;
                     if now < deadline_ms {
-                        next_deadline_ms = deadline_ms;
+                        next_timeout_ms = deadline_ms - now;
                         break;
                     }
 
@@ -749,7 +764,7 @@ impl ChannelTimer {
             }
 
             for channel in &fired_channels {
-                channel.send(Command::Tick).await;
+                channel.submit(Command::Tick);
             }
             fired_channels.clear();
         }
@@ -760,6 +775,10 @@ impl ChannelTimer {
         std::time::Instant::now()
             .saturating_duration_since(self.baseline)
             .as_millis() as u64
+    }
+
+    fn close(&self) {
+        self.state.1.store(true, Ordering::Release);
     }
 }
 
@@ -778,7 +797,7 @@ struct Worker {
     master: RemoteMaster,
     state_machines: HashMap<u64, StreamStateMachine>,
 
-    channel_timer: ChannelTimer,
+    channel_timer: (ChannelTimer, JoinHandle<()>),
 
     consumed: Vec<Channel>,
     streams: HashMap<u64, Channel>,
@@ -788,13 +807,18 @@ struct Worker {
 #[allow(unused)]
 impl Worker {
     pub fn new(opt: WorkerOption) -> Self {
+        let channel_timer = ChannelTimer::new(opt.heartbeat_interval_ms);
+        let cloned_timer = channel_timer.clone();
+        let join_handle = thread::spawn(|| {
+            cloned_timer.run();
+        });
         Worker {
             observer_id: opt.observer_id,
             master: opt.master,
             selector: opt.selector,
             state_machines: HashMap::new(),
 
-            channel_timer: ChannelTimer::new(opt.heartbeat_interval_ms),
+            channel_timer: (channel_timer, join_handle),
 
             consumed: Vec::new(),
             streams: HashMap::new(),
@@ -802,25 +826,26 @@ impl Worker {
         }
     }
 
-    async fn execute_actions(&mut self, actions: Vec<Action>) {
+    fn execute_actions(&mut self, actions: Vec<Action>) {
         for act in actions {
             match act {
                 Action::Add { name, channel } => {
                     let stream_id = channel.stream_id();
                     let state_machine = StreamStateMachine::new(name);
-                    if self.streams.insert(stream_id, channel).is_some() {
+                    if self.streams.insert(stream_id, channel.clone()).is_some() {
                         panic!("add a channel multiple times");
                     }
                     self.state_machines.insert(stream_id, state_machine);
+                    self.consumed.push(channel);
                 }
                 Action::Remove(stream_id) => {
                     self.streams.remove(&stream_id);
                     self.state_machines.remove(&stream_id);
-                    self.channel_timer.unregister(stream_id);
+                    self.channel_timer.0.unregister(stream_id);
                 }
                 Action::Observe(stream_id) => {
                     if let Some(channel) = self.streams.get(&stream_id) {
-                        self.channel_timer.register(channel.clone()).await;
+                        self.channel_timer.0.register(channel.clone());
                     } else {
                         panic!("no such stream exists");
                     }
@@ -829,7 +854,7 @@ impl Worker {
         }
     }
 
-    async fn handle_active_channels(&mut self, actives: Vec<u64>) {
+    fn handle_active_channels(&mut self, actives: Vec<u64>) {
         for mut stream_id in actives {
             let channel = match self.streams.get_mut(&stream_id) {
                 Some(channel) => channel,
@@ -838,7 +863,7 @@ impl Worker {
                     continue;
                 }
             };
-            let commands = channel.fetch().await;
+            let commands = channel.fetch();
             let state_machine = self
                 .state_machines
                 .get_mut(&stream_id)
@@ -847,8 +872,8 @@ impl Worker {
             for cmd in commands {
                 match cmd {
                     Command::Msg(msg) => state_machine.step(msg),
-                    Command::Proposal(event) => {
-                        state_machine.propose(event);
+                    Command::Proposal { event, sender } => {
+                        sender.send(state_machine.propose(event));
                     }
                     Command::Tick => send_heartbeat(
                         &self.master,
@@ -881,45 +906,52 @@ impl Worker {
         todo!();
     }
 
-    async fn run(&mut self) {
-        loop {
+    fn run(&mut self, exit_flag: Arc<AtomicBool>) {
+        while !exit_flag.load(Ordering::Acquire) {
             // Read entries and actions from fired channels.
-            let (actions, actives) = self.selector.select(&self.consumed).await;
+            let (actions, actives) = self.selector.select(&self.consumed);
             self.consumed.clear();
 
-            self.execute_actions(actions).await;
-            self.handle_active_channels(actives).await;
+            self.execute_actions(actions);
+            self.handle_active_channels(actives);
         }
     }
 }
 
-pub(crate) async fn order_worker(opt: WorkerOption) {
-    Worker::new(opt).run().await;
+pub(crate) fn order_worker(opt: WorkerOption, exit_flag: Arc<AtomicBool>) {
+    Worker::new(opt).run(exit_flag);
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn channel_timer_timeout() {
+    #[test]
+    fn channel_timer_timeout() {
         let timer = ChannelTimer::new(100);
-        let bg_timer = timer.clone();
-        tokio::spawn(async move { bg_timer.run().await });
+        let cloned_timer = timer.clone();
+        let join_handle = std::thread::spawn(|| {
+            cloned_timer.run();
+        });
 
         let channel = Channel::new(1);
-        timer.register(channel.clone()).await;
+        timer.register(channel.clone());
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(channel.fetch().await.len(), 0);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(channel.fetch().len(), 0);
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        timer.unregister(channel.stream_id()).await;
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        std::thread::sleep(Duration::from_millis(200));
+        timer.unregister(channel.stream_id());
+        std::thread::sleep(Duration::from_millis(200));
 
-        let cmds = channel.fetch().await;
+        let cmds = channel.fetch();
         assert_eq!(cmds.len(), 2);
         assert!(matches!(cmds[0], Command::Tick));
         assert!(matches!(cmds[1], Command::Tick));
+
+        timer.close();
+        join_handle.join().unwrap();
     }
 }

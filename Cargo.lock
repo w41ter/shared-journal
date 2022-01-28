@@ -92,6 +92,7 @@ dependencies = [
  "async-trait",
  "bitflags",
  "futures",
+ "libc",
  "prost",
  "tempfile",
  "thiserror",

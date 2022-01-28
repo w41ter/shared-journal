@@ -84,10 +84,23 @@ pub enum Command {
     },
 }
 
+/// The meta of a stream.
+#[derive(Clone)]
+#[allow(unused)]
+pub(crate) struct StreamMeta {
+    /// The internal unique ID of stream.
+    pub stream_id: u64,
+
+    pub stream_name: String,
+}
+
 /// An abstraction of master of shared journal.
 #[async_trait]
 pub(super) trait Master {
     type MetaStream: Stream<Item = Result<SegmentMeta>>;
+
+    /// Query the meta of stream.
+    async fn get_stream(&self, stream_name: &str) -> Result<Option<StreamMeta>>;
 
     /// Sends the state of a stream observer to master, and receives commands.
     async fn heartbeat(&self, observer_meta: ObserverMeta) -> Result<Vec<Command>>;
@@ -107,8 +120,8 @@ mod remote {
     use async_trait::async_trait;
     use futures::Stream;
 
-    use super::{mem::Client, SegmentMeta};
-    use crate::{masterpb, Result};
+    use super::{mem::Client, SegmentMeta, StreamMeta};
+    use crate::{masterpb, Error, Result};
 
     impl From<masterpb::Command> for super::Command {
         fn from(cmd: masterpb::Command) -> Self {
@@ -178,6 +191,21 @@ mod remote {
     #[allow(dead_code, unused)]
     impl super::Master for RemoteMaster {
         type MetaStream = MetaStream;
+
+        async fn get_stream(&self, stream_name: &str) -> Result<Option<StreamMeta>> {
+            let req = masterpb::GetStreamRequest {
+                stream_name: stream_name.to_owned(),
+            };
+
+            match self.master_client.get_stream(req).await {
+                Ok(resp) => Ok(Some(StreamMeta {
+                    stream_id: resp.stream_id,
+                    stream_name: stream_name.to_owned(),
+                })),
+                Err(Error::NotFound(_)) => Ok(None),
+                Err(err) => Err(err),
+            }
+        }
 
         async fn heartbeat(
             &self,

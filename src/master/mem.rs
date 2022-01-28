@@ -190,6 +190,18 @@ impl Server {
 #[async_trait]
 #[allow(unused)]
 impl masterpb::master_server::Master for Server {
+    async fn get_stream(
+        &self,
+        input: Request<masterpb::GetStreamRequest>,
+    ) -> Result<Response<masterpb::GetStreamResponse>, Status> {
+        let req = input.into_inner();
+        let inner = self.inner.lock().await;
+        match inner.stream_meta.get(&req.stream_name) {
+            Some(s) => Ok(Response::new(masterpb::GetStreamResponse { stream_id: *s })),
+            None => Err(Status::not_found("no such stream exists")),
+        }
+    }
+
     async fn get_segment(
         &self,
         input: Request<masterpb::GetSegmentRequest>,
@@ -267,6 +279,15 @@ impl Client {
         let addr = format!("http://{}", addr);
         let client = MasterClient::connect(addr).await?;
         Ok(Client { client })
+    }
+
+    pub async fn get_stream(
+        &self,
+        input: masterpb::GetStreamRequest,
+    ) -> crate::Result<masterpb::GetStreamResponse> {
+        let mut client = self.client.clone();
+        let resp = client.get_stream(input).await?;
+        Ok(resp.into_inner())
     }
 
     pub async fn get_segment(

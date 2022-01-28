@@ -21,15 +21,17 @@ mod orchestrator;
 mod proto;
 mod segment;
 mod server;
-mod stream;
 
 pub use self::{
     error::{Error, Result},
-    journal::{build_journal, Journal, JournalOption, Role},
-    stream::{Sequence, StreamReader, StreamWriter},
+    journal::{
+        build_journal,
+        stream::{Sequence, StreamReader, StreamWriter},
+        Journal, JournalOption, Role,
+    },
 };
 use self::{
-    master::ObserverState,
+    master::{ObserverState, StreamMeta},
     proto::{master as masterpb, server as serverpb},
 };
 

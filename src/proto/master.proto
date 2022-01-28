@@ -45,12 +45,23 @@ message Command {
 }
 
 service Master {
+    // Get stream meta.
+    rpc GetStream(GetStreamRequest) returns (GetStreamResponse);
+
     // Get segment meta of the specified epoch of a stream.
     rpc GetSegment(GetSegmentRequest) returns (GetSegmentResponse);
 
     // Sent heartbeat to master and receives commands which must complete by
     // stream observers.
     rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+message GetStreamRequest {
+    string stream_name = 1;
+}
+
+message GetStreamResponse {
+    uint64 stream_id = 1;
 }
 
 message GetSegmentRequest {

@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use futures::channel::oneshot;
+
+use super::worker::{Channel, Command};
 use crate::Result;
 
 /// An increasing number to order events.
@@ -38,14 +41,27 @@ impl StreamReader {
     }
 }
 
-#[derive(Debug)]
-pub struct StreamWriter {}
+pub struct StreamWriter {
+    channel: Channel,
+}
+
+impl StreamWriter {
+    pub(crate) fn new(channel: Channel) -> Self {
+        StreamWriter { channel }
+    }
+}
 
 #[allow(dead_code, unused)]
 impl StreamWriter {
     /// Appends an event, returns the sequence of the event just append.
-    async fn append(&mut self, event: Vec<u8>) -> Result<Sequence> {
-        todo!();
+    pub async fn append(&mut self, event: Vec<u8>) -> Result<Sequence> {
+        let (sender, receiver) = oneshot::channel();
+        let proposal = Command::Proposal {
+            event: event.into(),
+            sender,
+        };
+        self.channel.submit(proposal);
+        receiver.await?
     }
 
     /// Truncates events up to a sequence (exclusive).
