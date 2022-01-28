@@ -15,6 +15,7 @@
 mod worker;
 
 use std::{
+    collections::HashMap,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -22,7 +23,7 @@ use std::{
 use futures::Stream;
 
 use self::worker::Selector;
-use crate::{Result, StreamReader, StreamWriter};
+use crate::{master::RemoteMaster, Result, StreamReader, StreamWriter};
 
 /// The role of a stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,28 +69,38 @@ impl Stream for EpochStateStream {
     }
 }
 
+#[derive(Clone)]
+#[allow(unused)]
+struct StreamMeta {
+    stream_id: u64,
+    stream_name: String,
+}
+
 /// A root structure of shared journal. This journal's streams divide time into
 /// epochs, and each epoch have at most one producer.
 #[allow(unused)]
 pub struct Journal {
+    master: RemoteMaster,
+    stream_meta: HashMap<String, StreamMeta>,
+    observed_streams: HashMap<u64, self::worker::Channel>,
     selector: Selector,
 }
 
 #[allow(dead_code, unused)]
 impl Journal {
     /// Return the current epoch state of the specified stream.
-    fn current_state(&self, stream_name: &str) -> Result<EpochState> {
+    pub fn current_state(&self, stream_name: &str) -> Result<EpochState> {
         todo!();
     }
 
     /// Return a endless stream which returns a new epoch state once the
     /// associated stream enters a new epoch.
-    fn subscribe_state(&self, stream_name: &str) -> Result<EpochStateStream> {
+    pub fn subscribe_state(&self, stream_name: &str) -> Result<EpochStateStream> {
         todo!();
     }
 
     /// Lists streams.
-    async fn list_streams(&self) -> Result<StreamLister> {
+    pub async fn list_streams(&self) -> Result<StreamLister> {
         todo!();
     }
 
@@ -98,7 +109,7 @@ impl Journal {
     /// # Errors
     ///
     /// Returns `Error::AlreadyExists` if the stream already exists.
-    async fn create_stream(&self, name: &str) -> Result<()> {
+    pub async fn create_stream(&self, name: &str) -> Result<()> {
         todo!();
     }
 
@@ -109,18 +120,59 @@ impl Journal {
     /// # Errors
     ///
     /// Returns `Error::NotFound` if the stream doesn't exist.
-    async fn delete_stream(&self, name: &str) -> Result<()> {
+    pub async fn delete_stream(&self, name: &str) -> Result<()> {
         todo!();
     }
 
     /// Returns a stream reader.
-    async fn new_stream_reader(&self, name: &str) -> Result<StreamReader> {
+    pub async fn new_stream_reader(&self, name: &str) -> Result<StreamReader> {
         todo!();
     }
 
     /// Returns a stream writer.
-    async fn new_stream_writer(&self, name: &str) -> Result<StreamWriter> {
+    pub async fn new_stream_writer(&self, name: &str) -> Result<StreamWriter> {
         todo!();
+    }
+}
+
+#[allow(dead_code)]
+impl Journal {
+    fn new(master: RemoteMaster, selector: Selector) -> Self {
+        Journal {
+            master,
+            stream_meta: HashMap::new(),
+            observed_streams: HashMap::new(),
+            selector,
+        }
+    }
+
+    async fn open_stream(&mut self, stream_name: &str) -> Result<self::worker::Channel> {
+        use self::worker::{Action, Channel};
+
+        let stream_meta = match self.stream_meta.get(stream_name) {
+            Some(meta) => meta,
+            None => {
+                // TODO(w41ter) support query stream meta.
+                todo!()
+            }
+        };
+
+        let stream_id = stream_meta.stream_id;
+        let channel = match self.observed_streams.get(&stream_id) {
+            Some(channel) => channel.clone(),
+            None => {
+                let channel = Channel::new(stream_meta.stream_id);
+                let act = Action::Add {
+                    name: stream_meta.stream_name.clone(),
+                    channel: channel.clone(),
+                };
+                self.observed_streams.insert(stream_id, channel.clone());
+                self.selector.execute(act).await;
+                channel
+            }
+        };
+
+        Ok(channel)
     }
 }
 
@@ -132,6 +184,9 @@ pub struct JournalOption {
 
     /// The address descriptor of the master.
     master_url: String,
+
+    /// Heartbeat intervals in milliseconds.
+    heartbeat_interval: u64,
 }
 
 /// Create and initialize a `Journal`, and start related asynchronous tasks.
@@ -144,8 +199,9 @@ pub async fn build_journal(opt: JournalOption) -> Result<Journal> {
     let selector = Selector::new();
     let worker_opt = WorkerOption {
         observer_id: opt.local_id,
-        master,
+        master: master.clone(),
         selector: selector.clone(),
+        heartbeat_interval_ms: opt.heartbeat_interval,
     };
 
     tokio::spawn(async move {
@@ -154,7 +210,7 @@ pub async fn build_journal(opt: JournalOption) -> Result<Journal> {
         order_worker(worker_opt).await;
     });
 
-    Ok(Journal { selector })
+    Ok(Journal::new(master, selector))
 }
 
 #[cfg(test)]
@@ -190,6 +246,7 @@ mod tests {
         let opt = JournalOption {
             local_id: "1".to_owned(),
             master_url: local_addr.to_string(),
+            heartbeat_interval: 500,
         };
         let journal = build_journal(opt).await.unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

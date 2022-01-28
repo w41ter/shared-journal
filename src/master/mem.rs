@@ -19,7 +19,7 @@ use tokio::sync::Mutex;
 use tonic::{transport::Channel, Request, Response, Status};
 
 use super::ObserverMeta;
-use crate::{masterpb, Role};
+use crate::{masterpb, Role, INITIAL_EPOCH};
 
 #[derive(Debug)]
 #[allow(unused)]
@@ -92,8 +92,6 @@ struct SegmentInfo {
     epoch: u32,
     acked_index: u32,
 }
-
-const INITIAL_EPOCH: u32 = 0;
 
 #[allow(unused)]
 struct StreamInfo {

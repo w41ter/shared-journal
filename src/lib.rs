@@ -33,6 +33,8 @@ use self::{
     proto::{master as masterpb, server as serverpb},
 };
 
+const INITIAL_EPOCH: u32 = 0;
+
 /// `Entry` is the minimum unit of the journal system. A continuous entries
 /// compound a stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
