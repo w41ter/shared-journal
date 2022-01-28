@@ -26,7 +26,7 @@ use tokio::sync::{Mutex, Notify};
 use crate::{
     master::{Command as MasterCmd, Master, RemoteMaster},
     segment::{SegmentWriter, WriteRequest},
-    Entry, ObserverState, Role, Sequence,
+    Entry, ObserverState, Role, Sequence, INITIAL_EPOCH,
 };
 
 /// Store entries for a stream.
@@ -142,7 +142,7 @@ impl Progress {
 
 #[derive(Clone)]
 #[allow(unused)]
-enum MsgDetail {
+pub(crate) enum MsgDetail {
     /// Store entries to.
     Store {
         acked_seq: u64,
@@ -157,7 +157,7 @@ enum MsgDetail {
 /// journal servers.
 #[derive(Clone)]
 #[allow(unused)]
-struct Message {
+pub(crate) struct Message {
     target: String,
     seg_epoch: u32,
     epoch: u32,
@@ -165,7 +165,7 @@ struct Message {
 }
 
 #[allow(unused)]
-enum Command {
+pub(crate) enum Command {
     Tick,
     Promote {
         role: crate::Role,
@@ -238,6 +238,22 @@ struct StreamStateMachine {
 
 #[allow(unused)]
 impl StreamStateMachine {
+    fn new(name: String) -> Self {
+        StreamStateMachine {
+            name,
+            epoch: INITIAL_EPOCH,
+            role: Role::Follower,
+            leader: "".to_owned(),
+            state: ObserverState::Following,
+            mem_store: MemStorage::new(INITIAL_EPOCH),
+            copy_set: HashMap::new(),
+            replication_policy: ReplicationPolicy::Simple,
+            acked_seq: 0,
+            ready: Ready::default(),
+            flags: Flags::NONE,
+        }
+    }
+
     fn promote(&mut self, epoch: u32, role: Role, leader: String, copy_set: Vec<String>) {
         self.epoch = epoch;
         self.state = match role {
@@ -388,14 +404,14 @@ struct ChannelState {
 
 #[derive(Clone)]
 #[allow(unused)]
-struct Channel {
+pub(crate) struct Channel {
     stream_id: u64,
     state: Arc<Mutex<ChannelState>>,
 }
 
 #[allow(unused)]
 impl Channel {
-    fn new(stream_id: u64) -> Self {
+    pub fn new(stream_id: u64) -> Self {
         Channel {
             stream_id,
             state: Arc::new(Mutex::new(ChannelState {
@@ -425,7 +441,7 @@ impl Channel {
         }
     }
 
-    async fn send(&self, val: Command) {
+    pub async fn send(&self, val: Command) {
         if let Some(launcher) = {
             let mut state = self.state.lock().await;
 
@@ -448,19 +464,28 @@ impl Launcher {
     async fn fire(&self, stream_id: u64) {
         let (lock, notify) = &*self.selector.inner;
 
-        let mut inner = lock.lock().await;
-        inner.actives.insert(stream_id);
-        if inner.wait {
-            inner.wait = false;
+        let mut state = lock.lock().await;
+        state.actives.insert(stream_id);
+        if state.wait {
+            state.wait = false;
             notify.notify_one();
         }
     }
+}
+
+#[derive(Clone)]
+#[allow(unused)]
+pub(crate) enum Action {
+    Add { name: String, channel: Channel },
+    Observe(u64),
+    Remove(u64),
 }
 
 #[allow(unused)]
 struct SelectorState {
     wait: bool,
     actives: HashSet<u64>,
+    actions: Vec<Action>,
 }
 
 #[derive(Clone)]
@@ -477,13 +502,14 @@ impl Selector {
                 Mutex::new(SelectorState {
                     wait: false,
                     actives: HashSet::new(),
+                    actions: Vec::new(),
                 }),
                 Notify::new(),
             )),
         }
     }
 
-    async fn select(&self, consumed: &[Channel]) -> Vec<u64> {
+    async fn select(&self, consumed: &[Channel]) -> (Vec<Action>, Vec<u64>) {
         let launcher = Launcher {
             selector: self.clone(),
         };
@@ -493,14 +519,28 @@ impl Selector {
 
         let (lock, notify) = &*self.inner;
         loop {
-            let mut inner = lock.lock().await;
-            if !inner.actives.is_empty() {
-                inner.wait = true;
-                drop(inner);
+            let mut state = lock.lock().await;
+            if state.actives.is_empty() && state.actions.is_empty() {
+                state.wait = true;
+                drop(state);
                 notify.notified().await;
                 continue;
             }
-            return std::mem::take(&mut inner.actives).into_iter().collect();
+            return (
+                std::mem::take(&mut state.actions),
+                std::mem::take(&mut state.actives).into_iter().collect(),
+            );
+        }
+    }
+
+    pub async fn execute(&self, act: Action) {
+        let (lock, notify) = &*self.inner;
+
+        let mut state = lock.lock().await;
+        state.actions.push(act);
+        if state.wait {
+            state.wait = false;
+            notify.notify_one();
         }
     }
 }
@@ -728,6 +768,7 @@ pub(crate) struct WorkerOption {
     pub observer_id: String,
     pub master: RemoteMaster,
     pub selector: Selector,
+    pub heartbeat_interval_ms: u64,
 }
 
 #[allow(unused)]
@@ -735,7 +776,13 @@ struct Worker {
     observer_id: String,
     selector: Selector,
     master: RemoteMaster,
-    streams: HashMap<u64, StreamStateMachine>,
+    state_machines: HashMap<u64, StreamStateMachine>,
+
+    channel_timer: ChannelTimer,
+
+    consumed: Vec<Channel>,
+    streams: HashMap<u64, Channel>,
+    writer_groups: HashMap<u32, WriterGroup>,
 }
 
 #[allow(unused)]
@@ -745,51 +792,83 @@ impl Worker {
             observer_id: opt.observer_id,
             master: opt.master,
             selector: opt.selector,
+            state_machines: HashMap::new(),
+
+            channel_timer: ChannelTimer::new(opt.heartbeat_interval_ms),
+
+            consumed: Vec::new(),
             streams: HashMap::new(),
+            writer_groups: HashMap::new(),
         }
     }
-}
 
-#[allow(unused)]
-pub(crate) async fn order_worker(opt: WorkerOption) {
-    let mut w = Worker::new(opt);
-    let mut consumed: Vec<Channel> = Vec::new();
-    let mut streams: HashMap<u64, Channel> = HashMap::new();
-    let mut writer_groups: HashMap<u32, WriterGroup> = HashMap::new();
+    async fn execute_actions(&mut self, actions: Vec<Action>) {
+        for act in actions {
+            match act {
+                Action::Add { name, channel } => {
+                    let stream_id = channel.stream_id();
+                    let state_machine = StreamStateMachine::new(name);
+                    if self.streams.insert(stream_id, channel).is_some() {
+                        panic!("add a channel multiple times");
+                    }
+                    self.state_machines.insert(stream_id, state_machine);
+                }
+                Action::Remove(stream_id) => {
+                    self.streams.remove(&stream_id);
+                    self.state_machines.remove(&stream_id);
+                    self.channel_timer.unregister(stream_id);
+                }
+                Action::Observe(stream_id) => {
+                    if let Some(channel) = self.streams.get(&stream_id) {
+                        self.channel_timer.register(channel.clone()).await;
+                    } else {
+                        panic!("no such stream exists");
+                    }
+                }
+            }
+        }
+    }
 
-    loop {
-        // Read entries from fired channels.
-        let actives = w.selector.select(&consumed).await;
-        consumed.clear();
+    async fn handle_active_channels(&mut self, actives: Vec<u64>) {
         for mut stream_id in actives {
-            let channel = streams.get_mut(&stream_id).expect("");
+            let channel = match self.streams.get_mut(&stream_id) {
+                Some(channel) => channel,
+                None => {
+                    // This stream has been removed.
+                    continue;
+                }
+            };
             let commands = channel.fetch().await;
-            let stream = w
-                .streams
+            let state_machine = self
+                .state_machines
                 .get_mut(&stream_id)
                 .expect("stream already exists");
 
             for cmd in commands {
                 match cmd {
-                    Command::Msg(msg) => stream.step(msg),
+                    Command::Msg(msg) => state_machine.step(msg),
                     Command::Proposal(event) => {
-                        stream.propose(event);
+                        state_machine.propose(event);
                     }
-                    Command::Tick => {
-                        send_heartbeat(&w.master, stream, w.observer_id.clone(), channel.clone())
-                    }
+                    Command::Tick => send_heartbeat(
+                        &self.master,
+                        state_machine,
+                        self.observer_id.clone(),
+                        channel.clone(),
+                    ),
                     Command::Promote {
                         epoch,
                         role,
                         leader,
                         copy_set,
-                    } => stream.promote(epoch, role, leader, copy_set),
+                    } => state_machine.promote(epoch, role, leader, copy_set),
                 }
             }
 
-            if let Some(mut ready) = stream.collect() {
-                let writer_group = writer_groups
-                    .get(&stream.epoch)
+            if let Some(mut ready) = state_machine.collect() {
+                let writer_group = self
+                    .writer_groups
+                    .get(&state_machine.epoch)
                     .expect("writer group should exists");
                 flush_messages(writer_group, ready.pending_messages);
                 if ready.still_active {
@@ -797,9 +876,25 @@ pub(crate) async fn order_worker(opt: WorkerOption) {
                     continue;
                 }
             }
-            consumed.push(channel.clone());
+            self.consumed.push(channel.clone());
+        }
+        todo!();
+    }
+
+    async fn run(&mut self) {
+        loop {
+            // Read entries and actions from fired channels.
+            let (actions, actives) = self.selector.select(&self.consumed).await;
+            self.consumed.clear();
+
+            self.execute_actions(actions).await;
+            self.handle_active_channels(actives).await;
         }
     }
+}
+
+pub(crate) async fn order_worker(opt: WorkerOption) {
+    Worker::new(opt).run().await;
 }
 
 #[cfg(test)]
