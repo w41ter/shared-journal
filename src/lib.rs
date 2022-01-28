@@ -14,6 +14,9 @@
 
 //! A stream storage implementations.
 
+#[macro_use]
+extern crate derivative;
+
 mod error;
 mod journal;
 mod master;

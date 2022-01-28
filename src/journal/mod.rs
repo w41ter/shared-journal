@@ -225,6 +225,7 @@ pub async fn build_journal(opt: JournalOption) -> Result<Journal> {
         master: master.clone(),
         selector: selector.clone(),
         heartbeat_interval_ms: opt.heartbeat_interval,
+        runtime_handle: tokio::runtime::Handle::current(),
     };
 
     let exit_flag = Arc::new(AtomicBool::new(false));
@@ -240,7 +241,7 @@ pub async fn build_journal(opt: JournalOption) -> Result<Journal> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, time::Duration};
 
     use tokio::net::TcpListener;
     use tokio_stream::wrappers::TcpListenerStream;
@@ -284,7 +285,7 @@ mod tests {
             master_url: master_addr.to_string(),
             heartbeat_interval: 500,
         };
-        let journal = build_journal(opt).await.unwrap();
+        let journal = build_journal(opt).await?;
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         drop(journal);
         Ok(())

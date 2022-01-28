@@ -25,6 +25,7 @@ use std::{
 
 use bitflags::bitflags;
 use futures::channel::oneshot;
+use tokio::runtime::Handle as RuntimeHandle;
 
 use crate::{
     master::{Command as MasterCmd, Master, RemoteMaster},
@@ -49,22 +50,22 @@ impl MemStorage {
         }
     }
 
-    /// Returns the index of last entry.
-    fn last_index(&self) -> u32 {
+    /// Returns the index of next entry.
+    fn next_index(&self) -> u32 {
         self.first_index + self.entries.len() as u32
     }
 
     /// Save entry and assign index.
     fn append(&mut self, entry: Entry) -> Sequence {
+        let next_index = self.next_index();
         self.entries.push_back(entry);
-        let last_index = self.last_index();
-        (self.epoch as u64) << 32 | (last_index as u64)
+        (self.epoch as u64) << 32 | (next_index as u64)
     }
 
     /// Range values.
     fn range(&self, r: std::ops::Range<u32>) -> Option<Vec<Entry>> {
-        let last_index = self.last_index();
-        if self.first_index <= r.start && r.end <= last_index + 1 {
+        let next_index = self.next_index();
+        if r.start < r.end && self.first_index <= r.start && r.end <= next_index {
             let start = (r.start - self.first_index) as usize;
             let end = (r.end - self.first_index) as usize;
             Some(self.entries.range(start..end).cloned().collect())
@@ -75,8 +76,8 @@ impl MemStorage {
 
     /// Drain useless entries
     fn release(&mut self, until: u32) {
-        let last_index = self.last_index();
-        if self.first_index < until && until <= last_index {
+        let next_index = self.next_index();
+        if self.first_index < until && until < next_index {
             let offset = until - self.first_index;
             self.entries.drain(..offset as usize);
         }
@@ -111,13 +112,13 @@ impl Progress {
     }
 
     /// Return which chunk needs to replicate to the target.
-    fn next_chunk(&self, last_index: u32) -> (u32, u32) {
+    fn next_chunk(&self, next_index: u32) -> (u32, u32) {
         if self.size == Self::WINDOW {
             (self.next_index, self.next_index)
-        } else if last_index > self.next_index {
-            (self.next_index, last_index)
+        } else if next_index > self.next_index {
+            (self.next_index, next_index)
         } else {
-            (last_index, last_index)
+            (next_index, next_index)
         }
     }
 
@@ -143,13 +144,15 @@ impl Progress {
     }
 }
 
-#[derive(Clone)]
+#[derive(Derivative, Clone)]
+#[derivative(Debug)]
 #[allow(unused)]
 pub(crate) enum MsgDetail {
     /// Store entries to.
     Store {
         acked_seq: u64,
         first_index: u32,
+        #[derivative(Debug = "ignore")]
         entries: Vec<Entry>,
     },
     /// The journal server have received store request.
@@ -158,7 +161,7 @@ pub(crate) enum MsgDetail {
 
 /// An abstraction of data communication between `StreamStateMachine` and
 /// journal servers.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 #[allow(unused)]
 pub(crate) struct Message {
     target: String,
@@ -167,6 +170,8 @@ pub(crate) struct Message {
     detail: MsgDetail,
 }
 
+#[derive(Derivative)]
+#[derivative(Debug)]
 #[allow(unused)]
 pub(crate) enum Command {
     Tick,
@@ -178,7 +183,9 @@ pub(crate) enum Command {
     },
     Msg(Message),
     Proposal {
+        #[derivative(Debug = "ignore")]
         event: Box<[u8]>,
+        #[derivative(Debug = "ignore")]
         sender: oneshot::Sender<Result<Sequence, Error>>,
     },
 }
@@ -261,6 +268,7 @@ impl StreamStateMachine {
             Role::Leader => ObserverState::Leading,
             Role::Follower => ObserverState::Following,
         };
+        self.role = role;
         self.mem_store = MemStorage::new(epoch);
         self.copy_set = copy_set
             .into_iter()
@@ -341,8 +349,9 @@ impl StreamStateMachine {
         server_id: &str,
         bcast_acked_seq: bool,
     ) {
-        let last_index = mem_store.last_index();
-        let (start, end) = progress.next_chunk(last_index);
+        let next_index = mem_store.next_index();
+        let (start, end) = progress.next_chunk(next_index);
+        println!("start {} end {}", start, end);
         let detail = match mem_store.range(start..end) {
             Some(entries) => {
                 /// Do not forward acked sequence to unmatched index.
@@ -374,7 +383,7 @@ impl StreamStateMachine {
         };
 
         ready.pending_messages.push(msg);
-        if end <= last_index {
+        if end < next_index {
             ready.still_active = true;
         }
     }
@@ -446,6 +455,8 @@ impl Channel {
         if let Some(launcher) = {
             let mut state = self.state.lock().unwrap();
 
+            println!("submit 1 item, before is {}", state.buf.len());
+            println!("submit command: {:?}", val);
             state.buf.push_back(val);
             state.launcher.take()
         } {
@@ -552,7 +563,11 @@ struct WriterGroup {
 }
 
 #[allow(unused)]
-fn flush_messages(writer_group: &WriterGroup, pending_messages: Vec<Message>) {
+fn flush_messages(
+    runtime: &RuntimeHandle,
+    writer_group: &WriterGroup,
+    pending_messages: Vec<Message>,
+) {
     for msg in pending_messages {
         if let MsgDetail::Store {
             acked_seq,
@@ -571,7 +586,7 @@ fn flush_messages(writer_group: &WriterGroup, pending_messages: Vec<Message>) {
                 acked: acked_seq,
                 entries,
             };
-            tokio::spawn(async move {
+            runtime.spawn(async move {
                 writer.store(write).await;
             });
         }
@@ -609,10 +624,16 @@ where
 }
 
 #[allow(unused)]
-fn send_heartbeat<M>(master: &M, stream: &StreamStateMachine, observer_id: String, channel: Channel)
-where
+fn send_heartbeat<M>(
+    runtime: &RuntimeHandle,
+    master: &M,
+    stream: &StreamStateMachine,
+    observer_id: String,
+    channel: Channel,
+) where
     M: Master + Clone + Send + Sync + 'static,
 {
+    println!("send heartbeat");
     let stream_name = stream.name.clone();
     let observer_meta = crate::master::ObserverMeta {
         observer_id,
@@ -623,7 +644,7 @@ where
     };
 
     let master_cloned = master.clone();
-    tokio::spawn(async move {
+    runtime.spawn(async move {
         match master_cloned.heartbeat(observer_meta).await {
             Ok(commands) => {
                 for cmd in commands {
@@ -631,7 +652,8 @@ where
                 }
             }
             Err(error) => {
-                todo!("log error message");
+                println!("error: {}", error);
+                todo!("log error message: {}", error);
             }
         }
     });
@@ -771,6 +793,7 @@ impl ChannelTimer {
             }
 
             for channel in &fired_channels {
+                println!("submit tick to channel {}", channel.stream_id());
                 channel.submit(Command::Tick);
             }
             fired_channels.clear();
@@ -795,6 +818,8 @@ pub(crate) struct WorkerOption {
     pub master: RemoteMaster,
     pub selector: Selector,
     pub heartbeat_interval_ms: u64,
+
+    pub runtime_handle: RuntimeHandle,
 }
 
 #[allow(unused)]
@@ -802,6 +827,7 @@ struct Worker {
     observer_id: String,
     selector: Selector,
     master: RemoteMaster,
+    runtime_handle: RuntimeHandle,
     state_machines: HashMap<u64, StreamStateMachine>,
 
     channel_timer: (ChannelTimer, JoinHandle<()>),
@@ -823,6 +849,7 @@ impl Worker {
             observer_id: opt.observer_id,
             master: opt.master,
             selector: opt.selector,
+            runtime_handle: opt.runtime_handle,
             state_machines: HashMap::new(),
 
             channel_timer: (channel_timer, join_handle),
@@ -880,9 +907,11 @@ impl Worker {
                 match cmd {
                     Command::Msg(msg) => state_machine.step(msg),
                     Command::Proposal { event, sender } => {
+                        // FIXME(w41ter) event should be acked before returning.
                         sender.send(state_machine.propose(event));
                     }
                     Command::Tick => send_heartbeat(
+                        &self.runtime_handle,
                         &self.master,
                         state_machine,
                         self.observer_id.clone(),
@@ -902,7 +931,7 @@ impl Worker {
                     .writer_groups
                     .get(&state_machine.epoch)
                     .expect("writer group should exists");
-                flush_messages(writer_group, ready.pending_messages);
+                flush_messages(&self.runtime_handle, writer_group, ready.pending_messages);
                 if ready.still_active {
                     // TODO(w41ter) support still active
                     continue;
@@ -960,5 +989,102 @@ mod tests {
 
         timer.close();
         join_handle.join().unwrap();
+    }
+
+    #[test]
+    fn mem_storage_append() {
+        let mut mem_storage = MemStorage::new(0);
+        for idx in 0..128 {
+            let seq = mem_storage.append(Entry::Event {
+                epoch: 0,
+                event: Box::new([0u8]),
+            });
+            assert_eq!(seq, idx);
+        }
+    }
+
+    #[test]
+    fn mem_storage_range() {
+        struct Test {
+            entries: Vec<Entry>,
+            range: std::ops::Range<u32>,
+            expect: Option<Vec<Entry>>,
+        }
+
+        let ent = |v| Entry::Event {
+            epoch: 1,
+            event: vec![v].into(),
+        };
+
+        let tests = vec![
+            // 1. empty request
+            Test {
+                entries: vec![],
+                range: 0..0,
+                expect: None,
+            },
+            // 2. empty request and out of range
+            Test {
+                entries: vec![],
+                range: 1..1,
+                expect: None,
+            },
+            // 3. single entry
+            Test {
+                entries: vec![ent(1)],
+                range: 0..1,
+                expect: Some(vec![ent(1)]),
+            },
+            // 4. out of range
+            Test {
+                entries: vec![ent(1)],
+                range: 1..2,
+                expect: None,
+            },
+            // 5. partially covered
+            Test {
+                entries: vec![ent(1), ent(2)],
+                range: 1..2,
+                expect: Some(vec![ent(2)]),
+            },
+            // 6. totally covered
+            Test {
+                entries: vec![ent(1), ent(2)],
+                range: 0..2,
+                expect: Some(vec![ent(1), ent(2)]),
+            },
+            // 7. out of range but partial covered
+            Test {
+                entries: vec![ent(1), ent(2)],
+                range: 0..3,
+                expect: None,
+            },
+            Test {
+                entries: vec![ent(1), ent(2)],
+                range: 1..3,
+                expect: None,
+            },
+        ];
+
+        for test in tests {
+            let mut mem_store = MemStorage::new(1);
+            println!("test {:?}", test.range);
+            for entry in test.entries {
+                mem_store.append(entry);
+            }
+            let got = mem_store.range(test.range);
+            match test.expect {
+                Some(entries) => {
+                    assert!(got.is_some());
+                    assert!(entries
+                        .into_iter()
+                        .zip(got.unwrap().into_iter())
+                        .all(|(l, r)| l == r));
+                }
+                None => {
+                    assert!(got.is_none());
+                }
+            }
+        }
     }
 }

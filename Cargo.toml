@@ -16,6 +16,7 @@ thiserror = "1.0"
 tokio = { version = "1.13", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.6"
+derivative = "2.2.0"
 
 [dev-dependencies]
 tempfile = "3"
