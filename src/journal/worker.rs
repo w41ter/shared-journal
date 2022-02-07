@@ -384,6 +384,7 @@ impl StreamStateMachine {
             None => return,
         };
 
+        progress.replicate(end);
         let msg = Message {
             target: server_id.to_owned(),
             seg_epoch: epoch,
