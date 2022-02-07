@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod mem;
+pub mod segment;
 
 use std::sync::Arc;
 
@@ -35,14 +36,14 @@ impl Server {
         }
     }
 
-    pub fn into_service(self) -> serverpb::shared_journal_server::SharedJournalServer<Server> {
-        serverpb::shared_journal_server::SharedJournalServer::new(self)
+    pub fn into_service(self) -> serverpb::segment_store_server::SegmentStoreServer<Server> {
+        serverpb::segment_store_server::SegmentStoreServer::new(self)
     }
 }
 
 #[async_trait]
 #[allow(unused)]
-impl serverpb::shared_journal_server::SharedJournal for Server {
+impl serverpb::segment_store_server::SegmentStore for Server {
     type ReadStream = mem::ReplicaReader;
 
     async fn store(
@@ -80,19 +81,19 @@ impl serverpb::shared_journal_server::SharedJournal for Server {
     }
 }
 
-type SharedJournalClient = serverpb::shared_journal_client::SharedJournalClient<Channel>;
+type SegmentStoreClient = serverpb::segment_store_client::SegmentStoreClient<Channel>;
 
 #[derive(Clone)]
 #[allow(unused)]
 pub struct Client {
-    client: SharedJournalClient,
+    client: SegmentStoreClient,
 }
 
 #[allow(dead_code)]
 impl Client {
     pub async fn connect(addr: &str) -> crate::Result<Client> {
         let addr = format!("http://{}", addr);
-        let client = SharedJournalClient::connect(addr).await?;
+        let client = SegmentStoreClient::connect(addr).await?;
         Ok(Client { client })
     }
 

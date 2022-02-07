@@ -20,10 +20,8 @@ extern crate derivative;
 mod error;
 mod journal;
 mod master;
-mod orchestrator;
 mod proto;
-mod segment;
-mod server;
+mod store;
 
 pub use self::{
     error::{Error, Result},

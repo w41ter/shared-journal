@@ -29,7 +29,7 @@ use tokio::runtime::Handle as RuntimeHandle;
 
 use crate::{
     master::{Command as MasterCmd, Master, RemoteMaster},
-    segment::{SegmentWriter, WriteRequest},
+    store::segment::{SegmentWriter, WriteRequest},
     Entry, Error, ObserverState, Result, Role, Sequence, INITIAL_EPOCH,
 };
 

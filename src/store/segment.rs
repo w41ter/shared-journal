@@ -30,7 +30,8 @@ use futures::{StreamExt, TryStreamExt};
 use lazy_static::lazy_static;
 use tonic::Streaming;
 
-use crate::{server::Client, serverpb, Entry, Error, Result, Sequence};
+use super::Client;
+use crate::{serverpb, Entry, Error, Result, Sequence};
 
 #[allow(unused)]
 pub(crate) struct SegmentReader {
