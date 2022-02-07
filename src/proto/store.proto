@@ -28,7 +28,7 @@ message Entry {
     bytes event = 3;
 }
 
-service SharedJournal {
+service SegmentStore {
     // Store some continuous entries to a segment. This function will create
     // a new segment replica if it not exists.
     rpc Store(StoreRequest) returns (StoreResponse);

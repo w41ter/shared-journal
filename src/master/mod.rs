@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub(crate) mod mem;
+mod orchestrator;
 
 use async_trait::async_trait;
 use futures::Stream;
