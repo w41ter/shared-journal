@@ -21,10 +21,16 @@
 //!
 //! Entry sequence = (epoch << 32) | index of entry.
 
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+
 use futures::{StreamExt, TryStreamExt};
+use lazy_static::lazy_static;
 use tonic::Streaming;
 
-use crate::{server::Client, serverpb, Entry, Result, SegmentMeta};
+use crate::{server::Client, serverpb, Entry, Error, Result, Sequence};
 
 #[allow(unused)]
 pub(crate) struct SegmentReader {
@@ -140,13 +146,13 @@ impl SegmentReaderBuilder {
     }
 }
 
-#[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) struct WriteRequest {
     /// The epoch of write request initiator, it's not always equal to segment's
     /// epoch.
     pub epoch: u32,
-    /// The first index of entries.
+    /// The first index of entries. It should always greater that zero, see
+    /// `journal::worker::Progress` for details.
     pub index: u32,
     /// The sequence of acked entries which:
     ///  1. the number of replicas is satisfied replication policy.
@@ -155,17 +161,38 @@ pub(crate) struct WriteRequest {
     pub entries: Vec<Entry>,
 }
 
+impl std::fmt::Debug for WriteRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WriteRequest")
+            .field("epoch", &self.epoch)
+            .field("index", &self.index)
+            .field("acked", &self.acked)
+            .field("entries_len", &self.entries.len())
+            .finish()
+    }
+}
+
+lazy_static! {
+    static ref CLIENTS: Arc<Mutex<HashMap<String, Client>>> = Arc::new(Mutex::new(HashMap::new()));
+}
+
 #[derive(Clone)]
 pub(crate) struct SegmentWriter {
-    meta: SegmentMeta,
-    client: Client,
+    stream_id: u64,
+    epoch: u32,
+    replica: String,
+    client: Option<Client>,
 }
 
 #[allow(dead_code)]
 impl SegmentWriter {
-    pub async fn new(meta: SegmentMeta, replica: String) -> Result<Self> {
-        let client = Client::connect(&replica).await?;
-        Ok(SegmentWriter { meta, client })
+    pub fn new(stream_id: u64, epoch: u32, replica: String) -> Self {
+        SegmentWriter {
+            stream_id,
+            epoch,
+            replica,
+            client: None,
+        }
     }
 }
 
@@ -178,18 +205,49 @@ impl SegmentWriter {
     }
 
     /// Store continuously entries with assigned index.
-    pub async fn store(&self, write: WriteRequest) -> Result<()> {
+    pub async fn store(&mut self, write: WriteRequest) -> Result<Sequence> {
+        if write.index == 0 {
+            return Err(Error::InvalidArgument(
+                "index should always greater than zero".to_owned(),
+            ));
+        }
+
         let entries = write.entries.into_iter().map(Into::into).collect();
         let req = serverpb::StoreRequest {
-            stream_id: self.meta.stream_id,
-            seg_epoch: self.meta.epoch,
+            stream_id: self.stream_id,
+            seg_epoch: self.epoch,
             acked_seq: write.acked,
             first_index: write.index,
             epoch: write.epoch,
             entries,
         };
 
-        self.client.store(req).await?;
-        Ok(())
+        let client = self.get_client().await?;
+        let resp = client.store(req).await?;
+
+        Ok(resp.persisted_seq)
+    }
+
+    async fn get_client(&mut self) -> Result<&Client> {
+        if self.client.is_none() {
+            // 1. query local CLIENTS
+            {
+                let clients = CLIENTS.lock().unwrap();
+                if let Some(client) = clients.get(&self.replica) {
+                    self.client = Some(client.clone());
+                }
+            }
+
+            // 2. alloc new connection
+            if self.client.is_none() {
+                // FIXME(w41ter) too many concurrent connections.
+                let client = Client::connect(&self.replica).await?;
+                self.client = Some(client.clone());
+                let mut clients = CLIENTS.lock().unwrap();
+                clients.insert(self.replica.clone(), client);
+            }
+        }
+
+        Ok(self.client.as_ref().unwrap())
     }
 }

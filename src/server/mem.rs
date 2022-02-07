@@ -102,7 +102,7 @@ impl PartialStream {
 }
 
 #[derive(Debug)]
-pub(super) struct ReplicaReader {
+pub(crate) struct ReplicaReader {
     next_index: u32,
     limit: usize,
     finished: bool,

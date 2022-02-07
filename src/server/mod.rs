@@ -23,12 +23,18 @@ use tonic::{transport::Channel, Request, Response, Status, Streaming};
 use crate::serverpb;
 
 #[derive(Debug)]
-struct Server {
+pub(crate) struct Server {
     store: Arc<Mutex<mem::Store>>,
 }
 
+#[allow(dead_code)]
 impl Server {
-    #[allow(dead_code)]
+    pub fn new() -> Self {
+        Server {
+            store: Arc::new(Mutex::new(mem::Store::new())),
+        }
+    }
+
     pub fn into_service(self) -> serverpb::shared_journal_server::SharedJournalServer<Server> {
         serverpb::shared_journal_server::SharedJournalServer::new(self)
     }
@@ -45,6 +51,7 @@ impl serverpb::shared_journal_server::SharedJournal for Server {
     ) -> Result<Response<serverpb::StoreResponse>, Status> {
         let req = input.into_inner();
         let mut store = self.store.lock().await;
+        let persisted_seq = (req.first_index as usize + req.entries.len()) as u64 - 1;
         store.store(
             req.stream_id,
             req.seg_epoch,
@@ -52,7 +59,9 @@ impl serverpb::shared_journal_server::SharedJournal for Server {
             req.first_index,
             req.entries.into_iter().map(Into::into).collect(),
         );
-        Ok(Response::new(serverpb::StoreResponse {}))
+
+        // TODO(w41ter) ensure previous sequences is acked.
+        Ok(Response::new(serverpb::StoreResponse { persisted_seq }))
     }
 
     async fn read(
@@ -207,9 +216,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let local_addr = listener.local_addr()?;
         tokio::task::spawn(async move {
-            let server = Server {
-                store: Arc::new(Mutex::new(mem::Store::new())),
-            };
+            let server = Server::new();
             tonic::transport::Server::builder()
                 .add_service(server.into_service())
                 .serve_with_incoming(TcpListenerStream::new(listener))

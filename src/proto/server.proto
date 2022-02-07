@@ -54,7 +54,9 @@ message StoreRequest {
     repeated Entry entries = 6;
 }
 
-message StoreResponse {}
+message StoreResponse {
+    uint64 persisted_seq = 1;
+}
 
 message ReadRequest {
     uint64 stream_id = 1;

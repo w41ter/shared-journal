@@ -14,6 +14,9 @@
 
 //! A stream storage implementations.
 
+#[macro_use]
+extern crate derivative;
+
 mod error;
 mod journal;
 mod master;
@@ -21,15 +24,17 @@ mod orchestrator;
 mod proto;
 mod segment;
 mod server;
-mod stream;
 
 pub use self::{
     error::{Error, Result},
-    journal::{build_journal, Journal, JournalOption, Role},
-    stream::{Sequence, StreamReader, StreamWriter},
+    journal::{
+        build_journal,
+        stream::{Sequence, StreamReader, StreamWriter},
+        Journal, JournalOption, Role,
+    },
 };
 use self::{
-    master::ObserverState,
+    master::{ObserverState, StreamMeta},
     proto::{master as masterpb, server as serverpb},
 };
 
@@ -37,19 +42,19 @@ const INITIAL_EPOCH: u32 = 0;
 
 /// `Entry` is the minimum unit of the journal system. A continuous entries
 /// compound a stream.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Derivative, Clone, PartialEq, Eq)]
+#[derivative(Debug)]
 #[allow(dead_code)]
 enum Entry {
     /// A placeholder, used in recovery phase.
     Hole,
     Event {
         epoch: u32,
+        #[derivative(Debug = "ignore")]
         event: Box<[u8]>,
     },
     /// A bridge record, which identify the end of a segment.
-    Bridge {
-        epoch: u32,
-    },
+    Bridge { epoch: u32 },
 }
 
 /// `SegmentMeta` records the metadata for locating a segment and its data.

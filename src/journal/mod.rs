@@ -12,18 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod stream;
 mod worker;
 
 use std::{
     collections::HashMap,
     pin::Pin,
+    sync::{atomic::AtomicBool, Arc},
     task::{Context, Poll},
+    thread::{self, JoinHandle},
 };
 
 use futures::Stream;
+use stream::{StreamReader, StreamWriter};
 
-use self::worker::Selector;
-use crate::{master::RemoteMaster, Result, StreamReader, StreamWriter};
+use self::worker::{Action, Channel, Selector};
+use crate::{
+    master::{Master, RemoteMaster},
+    Error, Result, StreamMeta,
+};
 
 /// The role of a stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,13 +76,6 @@ impl Stream for EpochStateStream {
     }
 }
 
-#[derive(Clone)]
-#[allow(unused)]
-struct StreamMeta {
-    stream_id: u64,
-    stream_name: String,
-}
-
 /// A root structure of shared journal. This journal's streams divide time into
 /// epochs, and each epoch have at most one producer.
 #[allow(unused)]
@@ -84,6 +84,8 @@ pub struct Journal {
     stream_meta: HashMap<String, StreamMeta>,
     observed_streams: HashMap<u64, self::worker::Channel>,
     selector: Selector,
+
+    worker_handle: (Arc<AtomicBool>, JoinHandle<()>),
 }
 
 #[allow(dead_code, unused)]
@@ -95,8 +97,14 @@ impl Journal {
 
     /// Return a endless stream which returns a new epoch state once the
     /// associated stream enters a new epoch.
-    pub fn subscribe_state(&self, stream_name: &str) -> Result<EpochStateStream> {
-        todo!();
+    pub async fn subscribe_state(&mut self, stream_name: &str) -> Result<EpochStateStream> {
+        let channel = self.open_stream_channel(stream_name).await?;
+
+        let act = Action::Observe(channel.stream_id());
+        self.selector.execute(act).await;
+
+        // TODO fill epoch state stream.
+        Ok(EpochStateStream {})
     }
 
     /// Lists streams.
@@ -120,8 +128,11 @@ impl Journal {
     /// # Errors
     ///
     /// Returns `Error::NotFound` if the stream doesn't exist.
-    pub async fn delete_stream(&self, name: &str) -> Result<()> {
-        todo!();
+    pub async fn delete_stream(&mut self, stream_name: &str) -> Result<()> {
+        let stream_meta = self.get_stream_meta(stream_name).await?;
+        let act = Action::Remove(stream_meta.stream_id);
+        self.selector.execute(act).await;
+        Ok(())
     }
 
     /// Returns a stream reader.
@@ -130,33 +141,45 @@ impl Journal {
     }
 
     /// Returns a stream writer.
-    pub async fn new_stream_writer(&self, name: &str) -> Result<StreamWriter> {
-        todo!();
+    pub async fn new_stream_writer(&mut self, stream_name: &str) -> Result<StreamWriter> {
+        let channel = self.open_stream_channel(stream_name).await?;
+        Ok(StreamWriter::new(channel))
     }
 }
 
 #[allow(dead_code)]
 impl Journal {
-    fn new(master: RemoteMaster, selector: Selector) -> Self {
+    fn new(
+        master: RemoteMaster,
+        selector: Selector,
+        worker_handle: (Arc<AtomicBool>, JoinHandle<()>),
+    ) -> Self {
         Journal {
             master,
             stream_meta: HashMap::new(),
             observed_streams: HashMap::new(),
             selector,
+            worker_handle,
         }
     }
 
-    async fn open_stream(&mut self, stream_name: &str) -> Result<self::worker::Channel> {
-        use self::worker::{Action, Channel};
-
-        let stream_meta = match self.stream_meta.get(stream_name) {
-            Some(meta) => meta,
+    async fn get_stream_meta(&mut self, stream_name: &str) -> Result<StreamMeta> {
+        match self.stream_meta.get(stream_name) {
+            Some(meta) => Ok(meta.clone()),
             None => {
-                // TODO(w41ter) support query stream meta.
-                todo!()
+                let stream_meta = match self.master.get_stream(stream_name).await? {
+                    Some(stream_meta) => stream_meta,
+                    None => return Err(Error::NotFound(stream_name.to_owned())),
+                };
+                self.stream_meta
+                    .insert(stream_name.to_owned(), stream_meta.clone());
+                Ok(stream_meta)
             }
-        };
+        }
+    }
 
+    async fn open_stream_channel(&mut self, stream_name: &str) -> Result<self::worker::Channel> {
+        let stream_meta = self.get_stream_meta(stream_name).await?;
         let stream_id = stream_meta.stream_id;
         let channel = match self.observed_streams.get(&stream_id) {
             Some(channel) => channel.clone(),
@@ -202,40 +225,51 @@ pub async fn build_journal(opt: JournalOption) -> Result<Journal> {
         master: master.clone(),
         selector: selector.clone(),
         heartbeat_interval_ms: opt.heartbeat_interval,
+        runtime_handle: tokio::runtime::Handle::current(),
     };
 
-    tokio::spawn(async move {
+    let exit_flag = Arc::new(AtomicBool::new(false));
+    let cloned_exit_flag = exit_flag.clone();
+    let join_handle = thread::spawn(|| {
         use self::worker::order_worker;
 
-        order_worker(worker_opt).await;
+        order_worker(worker_opt, cloned_exit_flag);
     });
 
-    Ok(Journal::new(master, selector))
+    Ok(Journal::new(master, selector, (exit_flag, join_handle)))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, time::Duration};
 
     use tokio::net::TcpListener;
     use tokio_stream::wrappers::TcpListenerStream;
 
     use super::*;
-    use crate::master::mem::Server;
+    use crate::{
+        master::mem::{MasterConfig, Server as MasterServer},
+        server::Server,
+    };
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn build_journal_and_run() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    type TResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+    async fn build_master(replicas: &[&str]) -> TResult<String> {
+        let master_config = MasterConfig {
+            heartbeat_interval_ms: 10,
+            heartbeat_timeout_tick: 3,
+        };
         let mut segment_meta = HashMap::new();
         segment_meta.insert("default".to_owned(), 1);
 
-        let replicas = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        let replicas: Vec<String> = replicas.iter().map(ToString::to_string).collect();
         let replicas_clone = replicas.clone();
         let segment_meta_clone = segment_meta.clone();
 
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let local_addr = listener.local_addr()?;
         tokio::task::spawn(async {
-            let server = Server::new(segment_meta_clone, replicas_clone);
+            let server = MasterServer::new(master_config, segment_meta_clone, replicas_clone);
             tonic::transport::Server::builder()
                 .add_service(server.into_service())
                 .serve_with_incoming(TcpListenerStream::new(listener))
@@ -243,14 +277,53 @@ mod tests {
                 .unwrap();
         });
 
+        Ok(local_addr.to_string())
+    }
+
+    async fn build_server() -> TResult<String> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let local_addr = listener.local_addr()?;
+        tokio::task::spawn(async move {
+            let server = Server::new();
+            tonic::transport::Server::builder()
+                .add_service(server.into_service())
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+        Ok(local_addr.to_string())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_journal_and_run() -> TResult<()> {
+        let master_addr = build_master(&["a", "b", "c"]).await?;
         let opt = JournalOption {
             local_id: "1".to_owned(),
-            master_url: local_addr.to_string(),
+            master_url: master_addr.to_string(),
             heartbeat_interval: 500,
         };
-        let journal = build_journal(opt).await.unwrap();
+        let journal = build_journal(opt).await?;
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         drop(journal);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stream_writer_append() -> TResult<()> {
+        let server_addr = build_server().await?;
+        let master_addr = build_master(&[&server_addr]).await?;
+        let opt = JournalOption {
+            local_id: "1".to_owned(),
+            master_url: master_addr.to_string(),
+            heartbeat_interval: 10,
+        };
+        let mut journal = build_journal(opt).await?;
+        journal.subscribe_state("default").await?;
+
+        thread::sleep(Duration::from_millis(20));
+        let mut stream_writer = journal.new_stream_writer("default").await?;
+        stream_writer.append(vec![0u8; 1]).await?;
+
         Ok(())
     }
 }

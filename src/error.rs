@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use futures::channel::oneshot;
 use thiserror::Error;
 
 /// Errors for all journal operations.
@@ -19,6 +20,8 @@ use thiserror::Error;
 pub enum Error {
     #[error("{0} is not found")]
     NotFound(String),
+    #[error("not leader, new leader is {0}")]
+    NotLeader(String),
     #[error("{0} already exists")]
     AlreadyExists(String),
     #[error("{0}")]
@@ -30,6 +33,19 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<oneshot::Canceled> for Error {
+    fn from(_: oneshot::Canceled) -> Self {
+        use std::io;
+
+        // Because we cannot determine whether a canceled proposal acked, it is
+        // processed according to the third state of distributed system.
+        Error::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "task has been canceled",
+        ))
+    }
+}
 
 impl From<tonic::Status> for Error {
     fn from(s: tonic::Status) -> Self {
@@ -51,6 +67,7 @@ impl From<tonic::transport::Error> for Error {
 impl From<Error> for tonic::Status {
     fn from(err: Error) -> Self {
         let (code, message) = match err {
+            Error::NotLeader(_) => unreachable!(),
             Error::NotFound(s) => (tonic::Code::NotFound, s),
             Error::AlreadyExists(s) => (tonic::Code::AlreadyExists, s),
             Error::InvalidArgument(s) => (tonic::Code::InvalidArgument, s),
