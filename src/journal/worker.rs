@@ -36,6 +36,9 @@ use crate::{
 /// Store entries for a stream.
 struct MemStore {
     epoch: u32,
+
+    /// It should always greater than zero, see `journal::worker::Progress` for
+    /// details.
     first_index: u32,
     entries: VecDeque<Entry>,
 }
@@ -125,7 +128,7 @@ impl Progress {
 
     fn replicate(&mut self, next_index: u32) {
         debug_assert!(self.size < Self::WINDOW);
-        debug_assert!(self.next_index < next_index);
+        debug_assert!(self.next_index <= next_index);
         self.next_index = next_index;
 
         let off = (self.start + self.size) % Self::WINDOW;
@@ -1108,7 +1111,7 @@ mod tests {
                 epoch: 0,
                 event: Box::new([0u8]),
             });
-            assert_eq!(seq, idx);
+            assert_eq!(seq, idx + 1);
         }
     }
 
@@ -1129,48 +1132,48 @@ mod tests {
             // 1. empty request
             Test {
                 entries: vec![],
-                range: 0..0,
+                range: 1..1,
                 expect: None,
             },
             // 2. empty request and out of range
             Test {
                 entries: vec![],
-                range: 1..1,
+                range: 2..2,
                 expect: None,
             },
             // 3. single entry
             Test {
                 entries: vec![ent(1)],
-                range: 0..1,
+                range: 1..2,
                 expect: Some(vec![ent(1)]),
             },
             // 4. out of range
             Test {
                 entries: vec![ent(1)],
-                range: 1..2,
+                range: 2..3,
                 expect: None,
             },
             // 5. partially covered
             Test {
                 entries: vec![ent(1), ent(2)],
-                range: 1..2,
+                range: 2..3,
                 expect: Some(vec![ent(2)]),
             },
             // 6. totally covered
             Test {
                 entries: vec![ent(1), ent(2)],
-                range: 0..2,
+                range: 1..3,
                 expect: Some(vec![ent(1), ent(2)]),
             },
             // 7. out of range but partial covered
             Test {
                 entries: vec![ent(1), ent(2)],
-                range: 0..3,
+                range: 1..4,
                 expect: None,
             },
             Test {
                 entries: vec![ent(1), ent(2)],
-                range: 1..3,
+                range: 2..4,
                 expect: None,
             },
         ];
