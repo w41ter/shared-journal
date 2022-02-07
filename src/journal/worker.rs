@@ -30,7 +30,7 @@ use tokio::runtime::Handle as RuntimeHandle;
 use crate::{
     master::{Command as MasterCmd, Master, RemoteMaster},
     segment::{SegmentWriter, WriteRequest},
-    Entry, Error, ObserverState, Role, Sequence, INITIAL_EPOCH,
+    Entry, Error, ObserverState, Result, Role, Sequence, INITIAL_EPOCH,
 };
 
 /// Store entries for a stream.
@@ -89,6 +89,7 @@ impl MemStorage {
 /// For now, let's assume that message passing is reliable.
 #[allow(unused)]
 struct Progress {
+    // TODO: matched index default values is zero.
     matched_index: u32,
     next_index: u32,
 
@@ -186,7 +187,7 @@ pub(crate) enum Command {
         #[derivative(Debug = "ignore")]
         event: Box<[u8]>,
         #[derivative(Debug = "ignore")]
-        sender: oneshot::Sender<Result<Sequence, Error>>,
+        sender: oneshot::Sender<Result<Sequence>>,
     },
 }
 
@@ -216,6 +217,7 @@ impl ReplicationPolicy {
 #[allow(unused)]
 struct Ready {
     still_active: bool,
+    acked_seq: Sequence,
 
     pending_messages: Vec<Message>,
 }
@@ -293,7 +295,7 @@ impl StreamStateMachine {
         }
     }
 
-    fn propose(&mut self, event: Box<[u8]>) -> Result<Sequence, Error> {
+    fn propose(&mut self, event: Box<[u8]>) -> Result<Sequence> {
         if self.role == Role::Follower {
             Err(Error::NotLeader(self.leader.clone()))
         } else {
@@ -310,6 +312,7 @@ impl StreamStateMachine {
             self.advance();
             self.broadcast();
             self.flags = Flags::NONE;
+            self.ready.acked_seq = self.acked_seq;
             Some(std::mem::take(&mut self.ready))
         } else {
             None
@@ -320,6 +323,7 @@ impl StreamStateMachine {
         debug_assert_eq!(self.role, Role::Leader);
         let acked_seq = self.replication_policy.advance(self.epoch, &self.copy_set);
         if self.acked_seq < acked_seq {
+            println!("bump acked_seq from {} to {}", self.acked_seq, acked_seq);
             self.acked_seq = acked_seq;
             self.flags |= Flags::ACK_ADVANCED;
         }
@@ -824,6 +828,40 @@ impl ChannelTimer {
 }
 
 #[allow(unused)]
+struct Applier {
+    proposals: VecDeque<(Sequence, oneshot::Sender<Result<Sequence>>)>,
+}
+
+#[allow(dead_code)]
+impl Applier {
+    fn new() -> Self {
+        Applier {
+            proposals: VecDeque::new(),
+        }
+    }
+
+    #[inline(always)]
+    fn push_proposal(&mut self, seq: Sequence, sender: oneshot::Sender<Result<Sequence>>) {
+        println!("save proposal {}", seq);
+        self.proposals.push_back((seq, sender));
+    }
+
+    /// Notify acked proposals.
+    fn might_advance(&mut self, acked_seq: Sequence) {
+        while let Some((seq, _)) = self.proposals.front() {
+            if *seq > acked_seq {
+                break;
+            }
+
+            let (seq, sender) = self.proposals.pop_front().unwrap();
+            sender.send(Ok(seq)).unwrap_or_else(|_| {
+                // The receives end is canceled.
+            });
+        }
+    }
+}
+
+#[allow(unused)]
 pub(crate) struct WorkerOption {
     pub observer_id: String,
     pub master: RemoteMaster,
@@ -840,6 +878,7 @@ struct Worker {
     master: RemoteMaster,
     runtime_handle: RuntimeHandle,
     state_machines: HashMap<u64, StreamStateMachine>,
+    appliers: HashMap<u64, Applier>,
 
     channel_timer: (ChannelTimer, JoinHandle<()>),
 
@@ -862,6 +901,7 @@ impl Worker {
             selector: opt.selector,
             runtime_handle: opt.runtime_handle,
             state_machines: HashMap::new(),
+            appliers: HashMap::new(),
 
             channel_timer: (channel_timer, join_handle),
 
@@ -881,11 +921,13 @@ impl Worker {
                         panic!("add a channel multiple times");
                     }
                     self.state_machines.insert(stream_id, state_machine);
+                    self.appliers.insert(stream_id, Applier::new());
                     self.consumed.push(channel);
                 }
                 Action::Remove(stream_id) => {
                     self.streams.remove(&stream_id);
                     self.state_machines.remove(&stream_id);
+                    self.appliers.remove(&stream_id);
                     self.channel_timer.0.unregister(stream_id);
                 }
                 Action::Observe(stream_id) => {
@@ -914,20 +956,33 @@ impl Worker {
                 .get_mut(&stream_id)
                 .expect("stream already exists");
 
+            let applier = self
+                .appliers
+                .get_mut(&stream_id)
+                .expect("stream already exists");
+
             for cmd in commands {
                 match cmd {
-                    Command::Msg(msg) => state_machine.step(msg),
-                    Command::Proposal { event, sender } => {
-                        // FIXME(w41ter) event should be acked before returning.
-                        sender.send(state_machine.propose(event));
+                    Command::Msg(msg) => {
+                        state_machine.step(msg);
                     }
-                    Command::Tick => send_heartbeat(
-                        &self.runtime_handle,
-                        &self.master,
-                        state_machine,
-                        self.observer_id.clone(),
-                        channel.clone(),
-                    ),
+                    Command::Proposal { event, sender } => match state_machine.propose(event) {
+                        Ok(seq) => {
+                            applier.push_proposal(seq, sender);
+                        }
+                        Err(err) => {
+                            sender.send(Err(err));
+                        }
+                    },
+                    Command::Tick => {
+                        send_heartbeat(
+                            &self.runtime_handle,
+                            &self.master,
+                            state_machine,
+                            self.observer_id.clone(),
+                            channel.clone(),
+                        );
+                    }
                     Command::Promote {
                         epoch,
                         role,
@@ -951,6 +1006,7 @@ impl Worker {
                     .get(&(channel.stream_id(), state_machine.epoch))
                     .expect("writer group should exists");
                 flush_messages(&self.runtime_handle, writer_group, ready.pending_messages);
+                applier.might_advance(ready.acked_seq);
                 if ready.still_active {
                     // TODO(w41ter) support still active
                     continue;
