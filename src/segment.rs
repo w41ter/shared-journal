@@ -30,7 +30,7 @@ use futures::{StreamExt, TryStreamExt};
 use lazy_static::lazy_static;
 use tonic::Streaming;
 
-use crate::{server::Client, serverpb, Entry, Result};
+use crate::{server::Client, serverpb, Entry, Error, Result, Sequence};
 
 #[allow(unused)]
 pub(crate) struct SegmentReader {
@@ -146,19 +146,30 @@ impl SegmentReaderBuilder {
     }
 }
 
-#[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) struct WriteRequest {
     /// The epoch of write request initiator, it's not always equal to segment's
     /// epoch.
     pub epoch: u32,
-    /// The first index of entries.
+    /// The first index of entries. It should always greater that zero, see
+    /// `journal::worker::Progress` for details.
     pub index: u32,
     /// The sequence of acked entries which:
     ///  1. the number of replicas is satisfied replication policy.
     ///  2. all previous entries are acked.
     pub acked: u64,
     pub entries: Vec<Entry>,
+}
+
+impl std::fmt::Debug for WriteRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WriteRequest")
+            .field("epoch", &self.epoch)
+            .field("index", &self.index)
+            .field("acked", &self.acked)
+            .field("entries_len", &self.entries.len())
+            .finish()
+    }
 }
 
 lazy_static! {
@@ -194,7 +205,13 @@ impl SegmentWriter {
     }
 
     /// Store continuously entries with assigned index.
-    pub async fn store(&mut self, write: WriteRequest) -> Result<()> {
+    pub async fn store(&mut self, write: WriteRequest) -> Result<Sequence> {
+        if write.index == 0 {
+            return Err(Error::InvalidArgument(
+                "index should always greater than zero".to_owned(),
+            ));
+        }
+
         let entries = write.entries.into_iter().map(Into::into).collect();
         let req = serverpb::StoreRequest {
             stream_id: self.stream_id,
@@ -206,9 +223,9 @@ impl SegmentWriter {
         };
 
         let client = self.get_client().await?;
-        client.store(req).await?;
+        let resp = client.store(req).await?;
 
-        Ok(())
+        Ok(resp.persisted_seq)
     }
 
     async fn get_client(&mut self) -> Result<&Client> {
@@ -216,9 +233,8 @@ impl SegmentWriter {
             // 1. query local CLIENTS
             {
                 let clients = CLIENTS.lock().unwrap();
-                match clients.get(&self.replica) {
-                    Some(client) => self.client = Some(client.clone()),
-                    None => {}
+                if let Some(client) = clients.get(&self.replica) {
+                    self.client = Some(client.clone());
                 }
             }
 

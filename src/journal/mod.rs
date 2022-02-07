@@ -247,7 +247,10 @@ mod tests {
     use tokio_stream::wrappers::TcpListenerStream;
 
     use super::*;
-    use crate::master::mem::{MasterConfig, Server};
+    use crate::{
+        master::mem::{MasterConfig, Server as MasterServer},
+        server::Server,
+    };
 
     type TResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -266,7 +269,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let local_addr = listener.local_addr()?;
         tokio::task::spawn(async {
-            let server = Server::new(master_config, segment_meta_clone, replicas_clone);
+            let server = MasterServer::new(master_config, segment_meta_clone, replicas_clone);
             tonic::transport::Server::builder()
                 .add_service(server.into_service())
                 .serve_with_incoming(TcpListenerStream::new(listener))
@@ -274,6 +277,20 @@ mod tests {
                 .unwrap();
         });
 
+        Ok(local_addr.to_string())
+    }
+
+    async fn build_server() -> TResult<String> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let local_addr = listener.local_addr()?;
+        tokio::task::spawn(async move {
+            let server = Server::new();
+            tonic::transport::Server::builder()
+                .add_service(server.into_service())
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
         Ok(local_addr.to_string())
     }
 
@@ -293,7 +310,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn stream_writer_append() -> TResult<()> {
-        let master_addr = build_master(&["a", "b", "c"]).await?;
+        let server_addr = build_server().await?;
+        let master_addr = build_master(&[&server_addr]).await?;
         let opt = JournalOption {
             local_id: "1".to_owned(),
             master_url: master_addr.to_string(),

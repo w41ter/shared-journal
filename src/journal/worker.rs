@@ -34,18 +34,18 @@ use crate::{
 };
 
 /// Store entries for a stream.
-struct MemStorage {
+struct MemStore {
     epoch: u32,
     first_index: u32,
     entries: VecDeque<Entry>,
 }
 
 #[allow(unused)]
-impl MemStorage {
+impl MemStore {
     fn new(epoch: u32) -> Self {
-        MemStorage {
+        MemStore {
             epoch,
-            first_index: 0,
+            first_index: 1,
             entries: VecDeque::new(),
         }
     }
@@ -89,7 +89,7 @@ impl MemStorage {
 /// For now, let's assume that message passing is reliable.
 #[allow(unused)]
 struct Progress {
-    // TODO: matched index default values is zero.
+    // The default value is zero, so any proposal's index should greater than zero.
     matched_index: u32,
     next_index: u32,
 
@@ -105,7 +105,7 @@ impl Progress {
     fn new() -> Self {
         Progress {
             matched_index: 0,
-            next_index: 0,
+            next_index: 1,
             start: 0,
             size: 0,
             in_flights: vec![0; Self::WINDOW],
@@ -140,6 +140,7 @@ impl Progress {
             self.start = (self.start + 1) % Self::WINDOW;
             self.size -= 1;
         }
+        self.matched_index = index;
         self.next_index = index + 1;
         self.size < Self::WINDOW
     }
@@ -206,7 +207,13 @@ impl ReplicationPolicy {
         match self {
             ReplicationPolicy::Simple => progresses
                 .iter()
-                .map(|(_, p)| (epoch as u64) << 32 | (p.matched_index as u64))
+                .filter_map(|(_, p)| {
+                    if p.matched_index == 0 {
+                        None
+                    } else {
+                        Some((epoch as u64) << 32 | (p.matched_index as u64))
+                    }
+                })
                 .max()
                 .unwrap_or_default(),
         }
@@ -236,7 +243,7 @@ struct StreamStateMachine {
     role: Role,
     leader: String,
     state: ObserverState,
-    mem_store: MemStorage,
+    mem_store: MemStore,
     copy_set: HashMap<String, Progress>,
     replication_policy: ReplicationPolicy,
 
@@ -255,7 +262,7 @@ impl StreamStateMachine {
             role: Role::Follower,
             leader: "".to_owned(),
             state: ObserverState::Following,
-            mem_store: MemStorage::new(INITIAL_EPOCH),
+            mem_store: MemStore::new(INITIAL_EPOCH),
             copy_set: HashMap::new(),
             replication_policy: ReplicationPolicy::Simple,
             acked_seq: 0,
@@ -271,7 +278,7 @@ impl StreamStateMachine {
             Role::Follower => ObserverState::Following,
         };
         self.role = role;
-        self.mem_store = MemStorage::new(epoch);
+        self.mem_store = MemStore::new(epoch);
         self.copy_set = copy_set
             .into_iter()
             .map(|remote| (remote, Progress::new()))
@@ -323,7 +330,6 @@ impl StreamStateMachine {
         debug_assert_eq!(self.role, Role::Leader);
         let acked_seq = self.replication_policy.advance(self.epoch, &self.copy_set);
         if self.acked_seq < acked_seq {
-            println!("bump acked_seq from {} to {}", self.acked_seq, acked_seq);
             self.acked_seq = acked_seq;
             self.flags |= Flags::ACK_ADVANCED;
         }
@@ -347,7 +353,7 @@ impl StreamStateMachine {
     fn replicate(
         ready: &mut Ready,
         progress: &mut Progress,
-        mem_store: &MemStorage,
+        mem_store: &MemStore,
         epoch: u32,
         acked_seq: u64,
         server_id: &str,
@@ -578,11 +584,17 @@ impl WriterGroup {
                 .collect(),
         }
     }
+
+    #[inline(always)]
+    pub fn epoch(&self) -> u32 {
+        self.epoch
+    }
 }
 
 #[allow(unused)]
 fn flush_messages(
     runtime: &RuntimeHandle,
+    channel: Channel,
     writer_group: &WriterGroup,
     pending_messages: Vec<Message>,
 ) {
@@ -598,14 +610,33 @@ fn flush_messages(
                 .get(&msg.target)
                 .expect("target not exists in copy group")
                 .clone();
+            let seg_epoch = writer_group.epoch();
+            let target = msg.target;
             let write = WriteRequest {
                 epoch: msg.epoch,
                 index: first_index,
                 acked: acked_seq,
                 entries,
             };
+            let cloned_channel = channel.clone();
             runtime.spawn(async move {
-                writer.store(write).await;
+                let epoch = write.epoch;
+                match writer.store(write).await {
+                    Ok(persisted_seq) => {
+                        // TODO(w41ter) validate persisted seq.
+                        let index = persisted_seq as u32;
+                        let msg = Message {
+                            target,
+                            seg_epoch,
+                            epoch,
+                            detail: MsgDetail::Received { index },
+                        };
+                        cloned_channel.submit(Command::Msg(msg));
+                    }
+                    Err(err) => {
+                        println!("send write request to {}: {:?}", target, err);
+                    }
+                }
             });
         }
     }
@@ -842,7 +873,6 @@ impl Applier {
 
     #[inline(always)]
     fn push_proposal(&mut self, seq: Sequence, sender: oneshot::Sender<Result<Sequence>>) {
-        println!("save proposal {}", seq);
         self.proposals.push_back((seq, sender));
     }
 
@@ -854,9 +884,8 @@ impl Applier {
             }
 
             let (seq, sender) = self.proposals.pop_front().unwrap();
-            sender.send(Ok(seq)).unwrap_or_else(|_| {
-                // The receives end is canceled.
-            });
+            // The receiving end was canceled.
+            sender.send(Ok(seq)).unwrap_or(());
         }
     }
 }
@@ -1005,7 +1034,12 @@ impl Worker {
                     .writer_groups
                     .get(&(channel.stream_id(), state_machine.epoch))
                     .expect("writer group should exists");
-                flush_messages(&self.runtime_handle, writer_group, ready.pending_messages);
+                flush_messages(
+                    &self.runtime_handle,
+                    channel.clone(),
+                    writer_group,
+                    ready.pending_messages,
+                );
                 applier.might_advance(ready.acked_seq);
                 if ready.still_active {
                     // TODO(w41ter) support still active
@@ -1067,7 +1101,7 @@ mod tests {
 
     #[test]
     fn mem_storage_append() {
-        let mut mem_storage = MemStorage::new(0);
+        let mut mem_storage = MemStore::new(0);
         for idx in 0..128 {
             let seq = mem_storage.append(Entry::Event {
                 epoch: 0,
@@ -1141,7 +1175,7 @@ mod tests {
         ];
 
         for test in tests {
-            let mut mem_store = MemStorage::new(1);
+            let mut mem_store = MemStore::new(1);
             for entry in test.entries {
                 mem_store.append(entry);
             }
