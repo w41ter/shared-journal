@@ -23,10 +23,13 @@
 
 use std::{
     collections::HashMap,
+    future::Future,
+    pin::Pin,
     sync::{Arc, Mutex},
+    task::{Context, Poll},
 };
 
-use futures::{StreamExt, TryStreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use lazy_static::lazy_static;
 use tonic::Streaming;
 
@@ -251,4 +254,119 @@ impl SegmentWriter {
 
         Ok(self.client.as_ref().unwrap())
     }
+}
+
+#[derive(Debug, Clone)]
+enum ReaderState {
+    None,
+    Polling,
+    Ready { entry: Entry },
+    Done,
+}
+
+struct Reader {
+    state: ReaderState,
+    entries_stream: Streaming<serverpb::Entry>,
+}
+
+struct CompoundSegmentReader {
+    readers: Vec<Reader>,
+}
+
+#[allow(dead_code)]
+impl CompoundSegmentReader {
+    fn new(streams: Vec<Streaming<serverpb::Entry>>) -> Self {
+        CompoundSegmentReader {
+            readers: streams
+                .into_iter()
+                .map(|stream| Reader {
+                    state: ReaderState::None,
+                    entries_stream: stream,
+                })
+                .collect(),
+        }
+    }
+
+    fn step(&mut self, cx: &mut Context<'_>) -> Result<()> {
+        for reader in &mut self.readers {
+            if let ReaderState::None = &reader.state {
+                let mut try_next = reader.entries_stream.try_next();
+                match Pin::new(&mut try_next).poll(cx) {
+                    Poll::Pending => {
+                        reader.state = ReaderState::Polling;
+                    }
+                    Poll::Ready(Ok(Some(entry))) => {
+                        reader.state = ReaderState::Ready {
+                            entry: entry.into(),
+                        };
+                    }
+                    Poll::Ready(Ok(None)) => {
+                        reader.state = ReaderState::Done;
+                    }
+                    Poll::Ready(Err(err)) => {
+                        return Err(err.into());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Stream for CompoundSegmentReader {
+    type Item = Result<Option<Entry>>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if let Err(err) = this.step(cx) {
+            return Poll::Ready(Some(Err(err)));
+        }
+
+        // TODO(w41ter) support replication policy.
+        if this
+            .readers
+            .iter()
+            .filter_map(|reader| match &reader.state {
+                // FIXME(w41ter) now we only assume entries returned from store is continuous.
+                ReaderState::Ready { entry: _ } => Some(()),
+                _ => None,
+            })
+            .count()
+            > 1
+        {
+            let mut entry_opt = None;
+            for reader in &mut this.readers {
+                if let ReaderState::Ready { entry } = &mut reader.state {
+                    entry_opt = Some(entry.clone());
+                    reader.state = ReaderState::None;
+                }
+            }
+            return Poll::Ready(Some(Ok(entry_opt)));
+        }
+
+        Poll::Pending
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) async fn build_compound_segment_reader(
+    stream_id: u64,
+    epoch: u32,
+    copy_set: Vec<String>,
+    start: Option<u32>,
+) -> Result<impl Stream<Item = Result<Option<Entry>>>> {
+    // FIXME(w41ter) more efficient implementation.
+    let mut streamings = vec![];
+    for addr in copy_set {
+        let client = Client::connect(&addr).await?;
+        let req = serverpb::ReadRequest {
+            stream_id,
+            seg_epoch: epoch,
+            start_index: start.unwrap_or(1),
+            limit: 0,
+        };
+        streamings.push(client.read(req).await?);
+    }
+
+    Ok(CompoundSegmentReader::new(streamings))
 }
