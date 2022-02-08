@@ -111,7 +111,7 @@ pub(crate) struct ReplicaReader {
 }
 
 impl Stream for ReplicaReader {
-    type Item = Result<serverpb::Entry, Status>;
+    type Item = Result<serverpb::ReadResponse, Status>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -134,7 +134,12 @@ impl Stream for ReplicaReader {
                         this.finished = true;
                     }
 
-                    return Poll::Ready(Some(Ok(entry.clone().into())));
+                    let resp = serverpb::ReadResponse {
+                        index: *index,
+                        entry: Some(entry.clone().into()),
+                    };
+
+                    return Poll::Ready(Some(Ok(resp)));
                 }
             }
         }

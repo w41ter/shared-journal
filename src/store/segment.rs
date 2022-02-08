@@ -39,12 +39,12 @@ use crate::{serverpb, Entry, Error, Result, Sequence};
 #[allow(unused)]
 pub(crate) struct SegmentReader {
     client: Client,
-    entries_stream: Streaming<serverpb::Entry>,
+    entries_stream: Streaming<serverpb::ReadResponse>,
 }
 
 #[allow(dead_code)]
 impl SegmentReader {
-    fn new(client: Client, entries_stream: Streaming<serverpb::Entry>) -> Self {
+    fn new(client: Client, entries_stream: Streaming<serverpb::ReadResponse>) -> Self {
         SegmentReader {
             client,
             entries_stream,
@@ -56,14 +56,18 @@ impl SegmentReader {
 impl SegmentReader {
     /// Returns the next entry.
     pub async fn try_next(&mut self) -> Result<Option<Entry>> {
-        Ok(self.entries_stream.try_next().await?.map(Into::into))
+        Ok(self
+            .entries_stream
+            .try_next()
+            .await?
+            .map(|resp| resp.entry.unwrap().into()))
     }
 
     /// Returns the next entry or waits until it is available.
     /// A None means that the stream has already terminated.
     pub async fn watch_next(&mut self) -> Result<Option<Entry>> {
         match self.entries_stream.next().await {
-            Some(r) => Ok(Some(r?.into())),
+            Some(r) => Ok(Some(r?.entry.unwrap().into())),
             None => Ok(None),
         }
     }
@@ -260,22 +264,22 @@ impl SegmentWriter {
 enum ReaderState {
     None,
     Polling,
-    Ready { entry: Entry },
+    Ready { index: u32, entry: Entry },
     Done,
 }
 
 struct Reader {
     state: ReaderState,
-    entries_stream: Streaming<serverpb::Entry>,
+    entries_stream: Streaming<serverpb::ReadResponse>,
 }
 
-struct CompoundSegmentReader {
+pub(crate) struct CompoundSegmentReader {
     readers: Vec<Reader>,
 }
 
 #[allow(dead_code)]
 impl CompoundSegmentReader {
-    fn new(streams: Vec<Streaming<serverpb::Entry>>) -> Self {
+    fn new(streams: Vec<Streaming<serverpb::ReadResponse>>) -> Self {
         CompoundSegmentReader {
             readers: streams
                 .into_iter()
@@ -287,7 +291,8 @@ impl CompoundSegmentReader {
         }
     }
 
-    fn step(&mut self, cx: &mut Context<'_>) -> Result<()> {
+    fn step(&mut self, cx: &mut Context<'_>) -> Result<bool> {
+        let mut active = false;
         for reader in &mut self.readers {
             if let ReaderState::None = &reader.state {
                 let mut try_next = reader.entries_stream.try_next();
@@ -295,12 +300,15 @@ impl CompoundSegmentReader {
                     Poll::Pending => {
                         reader.state = ReaderState::Polling;
                     }
-                    Poll::Ready(Ok(Some(entry))) => {
+                    Poll::Ready(Ok(Some(resp))) => {
+                        active = true;
                         reader.state = ReaderState::Ready {
-                            entry: entry.into(),
+                            index: resp.index,
+                            entry: resp.entry.unwrap().into(),
                         };
                     }
                     Poll::Ready(Ok(None)) => {
+                        active = true;
                         reader.state = ReaderState::Done;
                     }
                     Poll::Ready(Err(err)) => {
@@ -309,42 +317,49 @@ impl CompoundSegmentReader {
                 }
             }
         }
-        Ok(())
+        Ok(active)
     }
 }
 
 impl Stream for CompoundSegmentReader {
-    type Item = Result<Option<Entry>>;
+    type Item = Result<(u32, Box<[u8]>)>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        if let Err(err) = this.step(cx) {
-            return Poll::Ready(Some(Err(err)));
-        }
+        loop {
+            match this.step(cx) {
+                Err(err) => return Poll::Ready(Some(Err(err))),
+                Ok(false) => return Poll::Pending,
+                Ok(true) => {}
+            };
 
-        // TODO(w41ter) support replication policy.
-        if this
-            .readers
-            .iter()
-            .filter_map(|reader| match &reader.state {
-                // FIXME(w41ter) now we only assume entries returned from store is continuous.
-                ReaderState::Ready { entry: _ } => Some(()),
-                _ => None,
-            })
-            .count()
-            > 1
-        {
-            let mut entry_opt = None;
-            for reader in &mut this.readers {
-                if let ReaderState::Ready { entry } = &mut reader.state {
-                    entry_opt = Some(entry.clone());
-                    reader.state = ReaderState::None;
+            // TODO(w41ter) support replication policy.
+            if this
+                .readers
+                .iter()
+                .filter_map(|reader| match &reader.state {
+                    // FIXME(w41ter) now we only assume entries returned from store is continuous.
+                    ReaderState::Ready { index: _, entry: _ } => Some(()),
+                    _ => None,
+                })
+                .count()
+                > 1
+            {
+                let mut entry_opt = None;
+                let mut index = 0;
+                for reader in &mut this.readers {
+                    if let ReaderState::Ready { index: i, entry } = &mut reader.state {
+                        entry_opt = Some(entry.clone());
+                        index = *i;
+                        reader.state = ReaderState::None;
+                    }
+                }
+
+                if let Entry::Event { epoch: _, event } = entry_opt.unwrap() {
+                    return Poll::Ready(Some(Ok((index, event))));
                 }
             }
-            return Poll::Ready(Some(Ok(entry_opt)));
         }
-
-        Poll::Pending
     }
 }
 
@@ -354,7 +369,7 @@ pub(crate) async fn build_compound_segment_reader(
     epoch: u32,
     copy_set: Vec<String>,
     start: Option<u32>,
-) -> Result<impl Stream<Item = Result<Option<Entry>>>> {
+) -> Result<CompoundSegmentReader> {
     // FIXME(w41ter) more efficient implementation.
     let mut streamings = vec![];
     for addr in copy_set {

@@ -109,7 +109,7 @@ impl Client {
     pub async fn read(
         &self,
         input: serverpb::ReadRequest,
-    ) -> crate::Result<Streaming<serverpb::Entry>> {
+    ) -> crate::Result<Streaming<serverpb::ReadResponse>> {
         let mut client = self.client.clone();
         let resp = client.read(input).await?;
         Ok(resp.into_inner())
@@ -239,8 +239,8 @@ mod tests {
             };
             let mut stream = client.read(req).await?;
             let mut got = Vec::<Entry>::new();
-            while let Some(item) = stream.next().await {
-                got.push(item?.into());
+            while let Some(resp) = stream.next().await {
+                got.push(resp?.entry.unwrap().into());
             }
             assert_eq!(got.len(), test.expect.len());
             assert!(got.iter().zip(test.expect.iter()).all(|(l, r)| l == r));

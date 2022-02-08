@@ -34,7 +34,7 @@ service SegmentStore {
     rpc Store(StoreRequest) returns (StoreResponse);
 
     // Read some entries from a segment.
-    rpc Read(ReadRequest) returns (stream Entry);
+    rpc Read(ReadRequest) returns (stream ReadResponse);
 }
 
 message StoreRequest {
@@ -64,4 +64,9 @@ message ReadRequest {
 
     uint32 start_index = 3;
     uint32 limit = 4;
+}
+
+message ReadResponse {
+    uint32 index = 1;
+    Entry entry = 2;
 }
