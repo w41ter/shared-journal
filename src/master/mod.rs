@@ -258,7 +258,7 @@ mod remote {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 
     use std::collections::HashMap;
 
@@ -267,6 +267,63 @@ mod tests {
     use tokio_stream::wrappers::TcpListenerStream;
 
     use super::*;
+
+    pub struct DummyMaster {}
+
+    #[allow(unused)]
+    #[async_trait]
+    impl Master for DummyMaster {
+        type MetaStream = MetaStream;
+
+        async fn get_stream(&self, stream_name: &str) -> Result<Option<StreamMeta>> {
+            Ok(None)
+        }
+
+        async fn heartbeat(
+            &self,
+            observer_meta: super::ObserverMeta,
+        ) -> Result<Vec<super::Command>> {
+            Ok(vec![])
+        }
+
+        async fn query_segments(
+            &self,
+            stream_name: &str,
+            range: std::ops::Range<u64>,
+        ) -> Result<Self::MetaStream> {
+            todo!()
+        }
+
+        async fn get_segment(&self, stream_name: &str, epoch: u32) -> Result<Option<SegmentMeta>> {
+            Ok(None)
+        }
+    }
+
+    pub async fn build_master(replicas: &[&str]) -> Result<String> {
+        let master_config = MasterConfig {
+            heartbeat_interval_ms: 10,
+            heartbeat_timeout_tick: 3,
+        };
+        let mut segment_meta = HashMap::new();
+        segment_meta.insert("default".to_owned(), 1);
+
+        let replicas: Vec<String> = replicas.iter().map(ToString::to_string).collect();
+        let replicas_clone = replicas.clone();
+        let segment_meta_clone = segment_meta.clone();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let local_addr = listener.local_addr()?;
+        tokio::task::spawn(async {
+            let server = Server::new(master_config, segment_meta_clone, replicas_clone);
+            tonic::transport::Server::builder()
+                .add_service(server.into_service())
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+
+        Ok(local_addr.to_string())
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn get_segment() -> std::result::Result<(), Box<dyn std::error::Error>> {
