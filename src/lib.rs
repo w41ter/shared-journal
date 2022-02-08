@@ -92,3 +92,16 @@ struct ReplicaMeta {
     epoch: u32,
     state: ReplicaState,
 }
+
+#[cfg(test)]
+mod tests {
+    use log::{error, info, warn};
+
+    #[test]
+    fn log() {
+        pretty_env_logger::init();
+        info!("such information");
+        warn!("o_O");
+        error!("much error");
+    }
+}
