@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use futures::{channel::oneshot, StreamExt, TryStreamExt};
+use futures::{channel::oneshot, StreamExt};
 
 use super::worker::{Channel, Command};
 use crate::{
@@ -72,18 +72,6 @@ impl StreamReader {
         self.start_index = Some(index);
         self.switch_segment().await?;
         Ok(())
-    }
-
-    /// Returns the next event.
-    async fn try_next(&mut self) -> Result<Option<(Sequence, Vec<u8>)>> {
-        match &mut self.segment_reader {
-            None => Err(Error::InvalidArgument("uninitialized".to_string())),
-            Some(reader) => {
-                // FIXME(w41ter) support try next;
-                let _value = reader.try_next().await?;
-                Ok(Some((0_u64, vec![0u8; 0])))
-            }
-        }
     }
 
     /// Returns the next event or waits until it is available.
