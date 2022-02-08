@@ -25,8 +25,9 @@ use std::{
 
 use bitflags::bitflags;
 use futures::channel::oneshot;
-use tokio::runtime::Handle as RuntimeHandle;
+use tokio::{runtime::Handle as RuntimeHandle, sync::mpsc::UnboundedSender};
 
+use super::EpochState;
 use crate::{
     master::{Command as MasterCmd, Master, RemoteMaster},
     store::segment::{SegmentWriter, WriteRequest},
@@ -274,12 +275,25 @@ impl StreamStateMachine {
         }
     }
 
+    fn epoch_state(&self) -> EpochState {
+        EpochState {
+            epoch: self.epoch as u64,
+            role: self.role,
+            leader: if self.epoch == INITIAL_EPOCH {
+                None
+            } else {
+                Some(self.leader.clone())
+            },
+        }
+    }
+
     fn promote(&mut self, epoch: u32, role: Role, leader: String, copy_set: Vec<String>) {
         self.epoch = epoch;
         self.state = match role {
             Role::Leader => ObserverState::Leading,
             Role::Follower => ObserverState::Following,
         };
+        self.leader = leader;
         self.role = role;
         self.mem_store = MemStore::new(epoch);
         self.copy_set = copy_set
@@ -499,8 +513,14 @@ impl Launcher {
 #[derive(Clone)]
 #[allow(unused)]
 pub(crate) enum Action {
-    Add { name: String, channel: Channel },
-    Observe(u64),
+    Add {
+        name: String,
+        channel: Channel,
+    },
+    Observe {
+        stream_id: u64,
+        sender: UnboundedSender<EpochState>,
+    },
     Remove(u64),
 }
 
@@ -553,7 +573,7 @@ impl Selector {
         )
     }
 
-    pub async fn execute(&self, act: Action) {
+    pub fn execute(&self, act: Action) {
         let (lock, cond) = &*self.state;
 
         let mut state = lock.lock().unwrap();
@@ -912,6 +932,7 @@ struct Worker {
     runtime_handle: RuntimeHandle,
     state_machines: HashMap<u64, StreamStateMachine>,
     appliers: HashMap<u64, Applier>,
+    state_observers: HashMap<u64, UnboundedSender<EpochState>>,
 
     channel_timer: (ChannelTimer, JoinHandle<()>),
 
@@ -935,6 +956,7 @@ impl Worker {
             runtime_handle: opt.runtime_handle,
             state_machines: HashMap::new(),
             appliers: HashMap::new(),
+            state_observers: HashMap::new(),
 
             channel_timer: (channel_timer, join_handle),
 
@@ -959,13 +981,22 @@ impl Worker {
                 }
                 Action::Remove(stream_id) => {
                     self.streams.remove(&stream_id);
-                    self.state_machines.remove(&stream_id);
                     self.appliers.remove(&stream_id);
+                    self.state_machines.remove(&stream_id);
+                    self.state_observers.remove(&stream_id);
                     self.channel_timer.0.unregister(stream_id);
                 }
-                Action::Observe(stream_id) => {
+                Action::Observe { stream_id, sender } => {
                     if let Some(channel) = self.streams.get(&stream_id) {
                         self.channel_timer.0.register(channel.clone());
+
+                        let state_machine = self
+                            .state_machines
+                            .get(&stream_id)
+                            .expect("stream should exists");
+                        if sender.send(state_machine.epoch_state()).is_ok() {
+                            self.state_observers.insert(stream_id, sender);
+                        }
                     } else {
                         panic!("no such stream exists");
                     }
@@ -1029,6 +1060,10 @@ impl Worker {
                             WriterGroup::new(channel.stream_id(), epoch, copy_set.clone()),
                         );
                         state_machine.promote(epoch, role, leader, copy_set);
+                        let state_observer = self.state_observers.get_mut(&stream_id);
+                        if let Some(sender) = state_observer {
+                            sender.send(state_machine.epoch_state());
+                        }
                     }
                 }
             }
@@ -1074,7 +1109,10 @@ pub(crate) fn order_worker(opt: WorkerOption, exit_flag: Arc<AtomicBool>) {
 mod tests {
     use std::time::Duration;
 
+    use tokio::sync::mpsc::unbounded_channel;
+
     use super::*;
+    use crate::master::tests::build_master;
 
     #[test]
     fn channel_timer_timeout() {
@@ -1197,5 +1235,82 @@ mod tests {
                 }
             }
         }
+    }
+
+    async fn build_observe_test_env() -> Result<Selector> {
+        let master_addr = build_master(&[]).await?;
+        let master = RemoteMaster::new(&master_addr).await?;
+        let selector = Selector::new();
+        let worker_opt = WorkerOption {
+            observer_id: "".to_string(),
+            master: master.clone(),
+            selector: selector.clone(),
+            heartbeat_interval_ms: 10000,
+            runtime_handle: tokio::runtime::Handle::current(),
+        };
+
+        thread::spawn(|| {
+            let exit_flag = Arc::new(AtomicBool::new(false));
+            let cloned_exit_flag = exit_flag.clone();
+            order_worker(worker_opt, cloned_exit_flag);
+        });
+
+        Ok(selector)
+    }
+
+    fn add_channel(selector: &mut Selector, stream_id: u64, stream_name: &str) -> Channel {
+        let channel = Channel::new(stream_id);
+        let act = Action::Add {
+            name: stream_name.to_string(),
+            channel: channel.clone(),
+        };
+        selector.execute(act);
+        channel
+    }
+
+    // Test the state observer's behavior.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn action_observe_will_receive_at_least_one_epoch_state() -> Result<()> {
+        let mut selector = build_observe_test_env().await?;
+
+        let stream_id = 1;
+        let channel = add_channel(&mut selector, stream_id, "DEFAULT");
+
+        let (sender, mut receiver) = unbounded_channel();
+        let act = Action::Observe { stream_id, sender };
+        selector.execute(act);
+
+        // A new observe action will receive the current epoch state.
+        let first_epoch_state = receiver.recv().await.unwrap();
+        assert_eq!(first_epoch_state.role, Role::Follower);
+
+        // When stream becomes a follower, notify the observer.
+        let mut new_epoch = first_epoch_state.epoch as u32 + 3;
+        channel.submit(Command::Promote {
+            epoch: new_epoch,
+            role: Role::Follower,
+            leader: "leader_1".to_string(),
+            copy_set: vec![],
+        });
+
+        let second_epoch_state = receiver.recv().await.unwrap();
+        assert_eq!(second_epoch_state.epoch, new_epoch as u64);
+        assert_eq!(second_epoch_state.role, Role::Follower);
+        assert!(matches!(second_epoch_state.leader, Some(x) if x == "leader_1"));
+
+        // When stream becomes a leader, notify the observer.
+        new_epoch += 10;
+        channel.submit(Command::Promote {
+            epoch: new_epoch,
+            role: Role::Leader,
+            leader: "leader_2".to_string(),
+            copy_set: vec![],
+        });
+        let third_epoch_state = receiver.recv().await.unwrap();
+        assert_eq!(third_epoch_state.epoch, new_epoch as u64);
+        assert_eq!(third_epoch_state.role, Role::Leader);
+        assert!(matches!(third_epoch_state.leader, Some(x) if x == "leader_2"));
+
+        Ok(())
     }
 }

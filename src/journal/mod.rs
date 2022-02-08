@@ -25,6 +25,7 @@ use std::{
 
 use futures::Stream;
 use stream::{StreamReader, StreamWriter};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
 use self::worker::{Action, Channel, Selector};
 use crate::{
@@ -66,13 +67,15 @@ impl Stream for StreamLister {
 }
 
 #[derive(Debug)]
-pub struct EpochStateStream {}
+pub struct EpochStateStream {
+    receiver: UnboundedReceiver<EpochState>,
+}
 
 impl Stream for EpochStateStream {
     type Item = EpochState;
 
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        todo!();
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.get_mut().receiver).poll_recv(cx)
     }
 }
 
@@ -100,11 +103,14 @@ impl Journal {
     pub async fn subscribe_state(&mut self, stream_name: &str) -> Result<EpochStateStream> {
         let channel = self.open_stream_channel(stream_name).await?;
 
-        let act = Action::Observe(channel.stream_id());
-        self.selector.execute(act).await;
+        let (sender, receiver) = unbounded_channel();
+        let act = Action::Observe {
+            stream_id: channel.stream_id(),
+            sender,
+        };
+        self.selector.execute(act);
 
-        // TODO fill epoch state stream.
-        Ok(EpochStateStream {})
+        Ok(EpochStateStream { receiver })
     }
 
     /// Lists streams.
@@ -131,7 +137,7 @@ impl Journal {
     pub async fn delete_stream(&mut self, stream_name: &str) -> Result<()> {
         let stream_meta = self.get_stream_meta(stream_name).await?;
         let act = Action::Remove(stream_meta.stream_id);
-        self.selector.execute(act).await;
+        self.selector.execute(act);
         Ok(())
     }
 
@@ -186,11 +192,11 @@ impl Journal {
             None => {
                 let channel = Channel::new(stream_meta.stream_id);
                 let act = Action::Add {
-                    name: stream_meta.stream_name.clone(),
+                    name: stream_meta.stream_name,
                     channel: channel.clone(),
                 };
                 self.observed_streams.insert(stream_id, channel.clone());
-                self.selector.execute(act).await;
+                self.selector.execute(act);
                 channel
             }
         };
