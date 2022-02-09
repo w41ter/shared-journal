@@ -83,6 +83,7 @@ message SealRequest {
 }
 
 message SealResponse {
-    // The acked index this replica already known.
+    // The acked index this replica already known.  This field is used to help
+    // determine the starting position of log entries that need recovery.
     uint32 acked_index = 1;
 }

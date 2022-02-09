@@ -51,9 +51,8 @@ impl Replica {
 
     fn store(&mut self, first_index: u32, entries: Vec<Entry>) -> Result<(), Status> {
         // TODO(w41ter)
-        //  1. check staled request
-        //  2. truncate other entries if it receive a bridge entry.
-        //  3. wake up reader's if it is sealed? (eg, bridge entry is acked)
+        //  1. truncate other entries if it receive a bridge entry.
+        //  2. wake up reader's if it is sealed? (eg, bridge entry is acked)
         for (off, entry) in entries.into_iter().enumerate() {
             let index = first_index + (off as u32);
             if self.bridge.map(|idx| index > idx).unwrap_or_default() {
