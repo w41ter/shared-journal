@@ -23,11 +23,11 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use futures::Stream;
+use futures::{channel::oneshot, Stream};
 use stream::{StreamReader, StreamWriter};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
-use self::worker::{Action, Channel, Selector};
+use self::worker::{Action, Channel, Command, Selector};
 use crate::{
     master::{Master, RemoteMaster},
     Error, Result, StreamMeta,
@@ -94,8 +94,14 @@ pub struct Journal {
 #[allow(dead_code, unused)]
 impl Journal {
     /// Return the current epoch state of the specified stream.
-    pub fn current_state(&self, stream_name: &str) -> Result<EpochState> {
-        todo!();
+    pub async fn current_state(&mut self, stream_name: &str) -> Result<EpochState> {
+        let channel = self.open_stream_channel(stream_name).await?;
+
+        let (sender, receiver) = oneshot::channel();
+        channel.submit(Command::EpochState { sender });
+
+        let epoch_state = receiver.await?;
+        Ok(epoch_state)
     }
 
     /// Return a endless stream which returns a new epoch state once the
@@ -329,6 +335,25 @@ mod tests {
         thread::sleep(Duration::from_millis(20));
         let mut stream_writer = journal.new_stream_writer("default").await?;
         stream_writer.append(vec![0u8; 1]).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stream_current_state() -> TResult<()> {
+        let server_addr = build_server().await?;
+        let master_addr = build_master(&[&server_addr]).await?;
+        let opt = JournalOption {
+            local_id: "1".to_owned(),
+            master_url: master_addr.to_string(),
+            heartbeat_interval: 10,
+        };
+        let mut journal = build_journal(opt).await?;
+        journal.subscribe_state("default").await?;
+
+        thread::sleep(Duration::from_millis(20));
+        let epoch_state = journal.current_state("default").await?;
+        assert_eq!(epoch_state.role, Role::Leader);
 
         Ok(())
     }

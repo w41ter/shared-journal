@@ -194,6 +194,10 @@ pub(crate) enum Command {
         #[derivative(Debug = "ignore")]
         sender: oneshot::Sender<Result<Sequence>>,
     },
+    EpochState {
+        #[derivative(Debug = "ignore")]
+        sender: oneshot::Sender<EpochState>,
+    },
 }
 
 #[allow(unused)]
@@ -1065,6 +1069,9 @@ impl Worker {
                             sender.send(state_machine.epoch_state());
                         }
                     }
+                    Command::EpochState { sender } => {
+                        sender.send(state_machine.epoch_state());
+                    }
                 }
             }
 
@@ -1243,7 +1250,7 @@ mod tests {
         let selector = Selector::new();
         let worker_opt = WorkerOption {
             observer_id: "".to_string(),
-            master: master.clone(),
+            master,
             selector: selector.clone(),
             heartbeat_interval_ms: 10000,
             runtime_handle: tokio::runtime::Handle::current(),
@@ -1251,8 +1258,7 @@ mod tests {
 
         thread::spawn(|| {
             let exit_flag = Arc::new(AtomicBool::new(false));
-            let cloned_exit_flag = exit_flag.clone();
-            order_worker(worker_opt, cloned_exit_flag);
+            order_worker(worker_opt, exit_flag);
         });
 
         Ok(selector)
