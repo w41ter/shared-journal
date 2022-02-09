@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   license:
-    if: (github.event_name == 'schedule' && github.repository == 'engula/engula') || (github.event_name != 'schedule')
+    if: (github.event_name == 'schedule' && github.repository == 'w41ter-l/shared-journal') || (github.event_name != 'schedule')
     name: Check license header
     runs-on: ubuntu-latest
     steps:
@@ -36,7 +36,7 @@ jobs:
           config: tools/ci/licenserc.yml
 
   editorconfig:
-    if: (github.event_name == 'schedule' && github.repository == 'engula/engula') || (github.event_name != 'schedule')
+    if: (github.event_name == 'schedule' && github.repository == 'w41ter-l/shared-journal') || (github.event_name != 'schedule')
     name: Check editorconfig
     needs: [license]
     runs-on: ubuntu-latest
@@ -54,7 +54,7 @@ jobs:
           editorconfig-checker/bin/ec -exclude editorconfig-checker
 
   toml:
-    if: (github.event_name == 'schedule' && github.repository == 'engula/engula') || (github.event_name != 'schedule')
+    if: (github.event_name == 'schedule' && github.repository == 'w41ter-l/shared-journal') || (github.event_name != 'schedule')
     name: Check TOML
     needs: [editorconfig]
     runs-on: ubuntu-latest
@@ -79,7 +79,7 @@ jobs:
         run: taplo format --check
 
   dependency:
-    if: (github.event_name == 'schedule' && github.repository == 'engula/engula') || (github.event_name != 'schedule')
+    if: (github.event_name == 'schedule' && github.repository == 'w41ter-l/shared-journal') || (github.event_name != 'schedule')
     name: Check dependency
     needs: [editorconfig]
     runs-on: ubuntu-latest
@@ -107,7 +107,7 @@ jobs:
           args: --workspace
 
   security:
-    if: (github.event_name == 'schedule' && github.repository == 'engula/engula') || (github.event_name != 'schedule')
+    if: (github.event_name == 'schedule' && github.repository == 'w41ter-l/shared-journal') || (github.event_name != 'schedule')
     name: Audit security
     needs: [editorconfig]
     runs-on: ubuntu-latest
@@ -134,12 +134,12 @@ jobs:
           command: audit
 
   test:
-    if: (github.event_name == 'schedule' && github.repository == 'engula/engula') || (github.event_name != 'schedule')
+    if: (github.event_name == 'schedule' && github.repository == 'w41ter-l/shared-journal') || (github.event_name != 'schedule')
     name: Run tests
     needs: [editorconfig]
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         rust: [nightly]
 
     runs-on: ${{ matrix.os }}
