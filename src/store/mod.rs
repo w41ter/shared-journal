@@ -300,7 +300,7 @@ mod tests {
         {
             Err(crate::Error::Staled(_)) => {}
             _ => {
-                assert!(false, "should reject staled sealing request");
+                panic!("should reject staled sealing request");
             }
         };
 
@@ -358,7 +358,7 @@ mod tests {
         match client.store(store_req).await {
             Err(crate::Error::Staled(_)) => {}
             _ => {
-                assert!(false, "should reject staled store request");
+                panic!("should reject staled store request");
             }
         };
 

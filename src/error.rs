@@ -76,7 +76,7 @@ impl From<Error> for tonic::Status {
             Error::InvalidArgument(s) => (tonic::Code::InvalidArgument, s),
             Error::Io(s) => (tonic::Code::Unknown, s.to_string()),
             Error::Unknown(s) => (tonic::Code::Unknown, s.to_string()),
-            Error::Staled(s) => (tonic::Code::FailedPrecondition, s.to_string()),
+            Error::Staled(s) => (tonic::Code::FailedPrecondition, s),
         };
         tonic::Status::new(code, message)
     }
