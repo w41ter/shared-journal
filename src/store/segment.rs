@@ -208,8 +208,18 @@ impl SegmentWriter {
 impl SegmentWriter {
     /// Seal the `store` operations of current segment, and any write operations
     /// issued with a small epoch will be rejected.
-    pub async fn seal(&self, new_epoch: u32) -> Result<()> {
-        todo!()
+    ///
+    /// SAFETY: implementation guaranteed to no cross-await-point references.
+    pub async fn seal(&mut self, new_epoch: u32) -> Result<u32> {
+        let client = self.get_client().await?;
+        let req = serverpb::SealRequest {
+            stream_id: self.stream_id,
+            seg_epoch: self.epoch,
+            epoch: new_epoch,
+        };
+
+        let resp = client.seal(req).await?;
+        Ok(resp.acked_index)
     }
 
     /// Store continuously entries with assigned index.
@@ -219,6 +229,8 @@ impl SegmentWriter {
                 "index should always greater than zero".to_owned(),
             ));
         }
+
+        let client = self.get_client().await?;
 
         let entries = write.entries.into_iter().map(Into::into).collect();
         let req = serverpb::StoreRequest {
@@ -230,13 +242,12 @@ impl SegmentWriter {
             entries,
         };
 
-        let client = self.get_client().await?;
         let resp = client.store(req).await?;
 
         Ok(resp.persisted_seq)
     }
 
-    async fn get_client(&mut self) -> Result<&Client> {
+    async fn get_client(&mut self) -> Result<Client> {
         if self.client.is_none() {
             // 1. query local CLIENTS
             {
@@ -256,7 +267,7 @@ impl SegmentWriter {
             }
         }
 
-        Ok(self.client.as_ref().unwrap())
+        Ok(self.client.as_ref().cloned().unwrap())
     }
 }
 

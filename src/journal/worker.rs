@@ -1112,6 +1112,98 @@ pub(crate) fn order_worker(opt: WorkerOption, exit_flag: Arc<AtomicBool>) {
     Worker::new(opt).run(exit_flag);
 }
 
+#[allow(unused, dead_code)]
+mod recovery {
+    use std::{
+        future::Future,
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
+    use futures::{stream, StreamExt};
+
+    use super::{Channel, MemStore, WriterGroup};
+    use crate::{Error, Result, SegmentMeta};
+
+    pub struct RecoveryContext {
+        /// The epoch current leader belongs to.
+        epoch: u32,
+        segment_meta: SegmentMeta,
+        mem_store: MemStore,
+        channel: Channel,
+        writer_group: WriterGroup,
+    }
+
+    #[allow(dead_code)]
+    async fn recovery(mut ctx: RecoveryContext) -> Result<()> {
+        let acked_index = seal(ctx.epoch, &mut ctx.writer_group).await?;
+        let _ = acked_index;
+        todo!("try read un-acked entries")
+    }
+
+    struct Seal<T> {
+        count: usize,
+        index: u32,
+        futures: Vec<Option<T>>,
+    }
+
+    impl<T> Seal<T>
+    where
+        T: Future<Output = Result<u32>>,
+    {
+        fn new(futures: Vec<Option<T>>) -> Self {
+            Seal {
+                count: 0,
+                index: 0,
+                futures,
+            }
+        }
+    }
+
+    impl<T> Future for Seal<T>
+    where
+        T: Future<Output = Result<u32>>,
+    {
+        type Output = Result<u32>;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            // SAFETY: see `store::segment::SegmentWriter::seal`.
+            let this = unsafe { self.get_unchecked_mut() };
+            for req in &mut this.futures {
+                if let Some(future) = req {
+                    let pin = unsafe { Pin::new_unchecked(future) };
+                    match pin.poll(cx) {
+                        Poll::Pending => continue,
+                        Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                        Poll::Ready(Ok(index)) => {
+                            // TODO(w41ter) compute index by the replication policy.
+                            *req = None;
+                            this.count += 1;
+                            this.index = this.index.max(index);
+                            if this.count > 1 {
+                                return Poll::Ready(Ok(this.index));
+                            }
+                        }
+                    }
+                }
+            }
+
+            Poll::Pending
+        }
+    }
+
+    fn seal(
+        epoch: u32,
+        writer_group: &mut WriterGroup,
+    ) -> Seal<impl Future<Output = Result<u32>> + '_> {
+        let mut futures = vec![];
+        for (addr, writer) in &mut writer_group.writers {
+            futures.push(Some(writer.seal(epoch)));
+        }
+        Seal::new(futures)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
