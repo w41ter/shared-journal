@@ -97,7 +97,7 @@ pub(crate) struct StreamMeta {
 
 /// An abstraction of master of shared journal.
 #[async_trait]
-pub(super) trait Master {
+pub(super) trait Master: Clone {
     type MetaStream: Stream<Item = Result<SegmentMeta>>;
 
     /// Query the meta of stream.
@@ -115,6 +115,10 @@ pub(super) trait Master {
 
     /// Get segment meta of the specified epoch of a stream.
     async fn get_segment(&self, stream_name: &str, epoch: u32) -> Result<Option<SegmentMeta>>;
+
+    /// Mark the corresponding segment as sealed.  The request is ignored if the
+    /// target segment is already sealed.
+    async fn seal_segment(&self, stream_id: u64) -> Result<()>;
 }
 
 mod remote {
@@ -250,9 +254,16 @@ mod remote {
                 stream_name: stream_name.to_owned(),
                 epoch,
                 copy_set: resp.copy_set,
+                state: resp.state.into(),
             };
 
             Ok(Some(seg_meta))
+        }
+
+        async fn seal_segment(&self, stream_id: u64) -> Result<()> {
+            let req = masterpb::SealSegmentRequest { stream_id };
+            self.master_client.seal_segment(req).await?;
+            Ok(())
         }
     }
 }
@@ -267,7 +278,9 @@ pub(crate) mod tests {
     use tokio_stream::wrappers::TcpListenerStream;
 
     use super::*;
+    use crate::SegmentState;
 
+    #[derive(Clone)]
     pub struct DummyMaster {}
 
     #[allow(unused)]
@@ -296,6 +309,10 @@ pub(crate) mod tests {
 
         async fn get_segment(&self, stream_name: &str, epoch: u32) -> Result<Option<SegmentMeta>> {
             Ok(None)
+        }
+
+        async fn seal_segment(&self, stream_id: u64) -> Result<()> {
+            Ok(())
         }
     }
 
@@ -357,6 +374,7 @@ pub(crate) mod tests {
                 stream_name: "default".to_owned(),
                 epoch: 1,
                 copy_set: replicas.clone(),
+                state: SegmentState::Appending,
             })
         );
 
@@ -446,6 +464,20 @@ pub(crate) mod tests {
             }
             if *epoch == 1 && *role == Role::Leader
         ));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn seal_segment() -> Result<()> {
+        let master_addr = build_master(&[]).await?;
+        let master = remote::RemoteMaster::new(&master_addr).await?;
+        let meta = master.get_segment("default", 1).await?.unwrap();
+        assert_eq!(meta.state, SegmentState::Appending);
+
+        master.seal_segment(meta.stream_id).await?;
+        let meta = master.get_segment("default", 1).await?.unwrap();
+        assert_eq!(meta.state, SegmentState::Sealed);
+
         Ok(())
     }
 }

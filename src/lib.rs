@@ -55,6 +55,20 @@ enum Entry {
     Bridge { epoch: u32 },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentState {
+    /// This segment is receiving new appends.
+    Appending,
+    /// This segment is sealed and don't receive any appends.
+    Sealed,
+}
+
+impl Default for SegmentState {
+    fn default() -> Self {
+        SegmentState::Appending
+    }
+}
+
 /// `SegmentMeta` records the metadata for locating a segment and its data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -62,6 +76,8 @@ pub struct SegmentMeta {
     stream_id: u64,
 
     stream_name: String,
+
+    state: SegmentState,
 
     /// A monotonic value in a stream. Allowing each segment's epoch value to be
     /// unique, it's easier to find a segment by its segment name and epoch.

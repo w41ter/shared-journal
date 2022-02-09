@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{Entry, ObserverState, Role};
+use super::{Entry, ObserverState, Role, SegmentState};
 
 pub mod server {
     tonic::include_proto!("engula.journal.v1.shared.server");
@@ -93,6 +93,24 @@ impl From<i32> for ObserverState {
             Some(master::ObserverState::Sealing) => ObserverState::Sealing,
             Some(master::ObserverState::Recovering) => ObserverState::Recovering,
             Some(master::ObserverState::Leading) => ObserverState::Leading,
+        }
+    }
+}
+
+impl From<i32> for SegmentState {
+    fn from(state: i32) -> Self {
+        match master::SegmentState::from_i32(state) {
+            None | Some(master::SegmentState::Appending) => SegmentState::Appending,
+            Some(master::SegmentState::Sealed) => SegmentState::Sealed,
+        }
+    }
+}
+
+impl From<SegmentState> for i32 {
+    fn from(state: SegmentState) -> Self {
+        match state {
+            SegmentState::Appending => master::SegmentState::Appending as i32,
+            SegmentState::Sealed => master::SegmentState::Sealed as i32,
         }
     }
 }

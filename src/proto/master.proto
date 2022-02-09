@@ -24,6 +24,12 @@ enum ObserverState {
     LEADING = 3;
 }
 
+// See src/lib.rs for details.
+enum SegmentState {
+    APPENDING = 0;
+    SEALED = 1;
+}
+
 // See src/journal.rs for details.
 enum Role {
     FOLLOWER = 0;
@@ -54,6 +60,9 @@ service Master {
     // Sent heartbeat to master and receives commands which must complete by
     // stream observers.
     rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+    // Seal the corresponding segment.
+    rpc SealSegment(SealSegmentRequest) returns (SealSegmentResponse);
 }
 
 message GetStreamRequest {
@@ -73,6 +82,8 @@ message GetSegmentResponse {
     uint64 stream_id = 1;
 
     repeated string copy_set = 2;
+
+    SegmentState state = 3;
 }
 
 message HeartbeatRequest {
@@ -88,3 +99,9 @@ message HeartbeatRequest {
 message HeartbeatResponse {
     repeated Command commands = 1;
 }
+
+message SealSegmentRequest {
+    uint64 stream_id = 1;
+}
+
+message SealSegmentResponse {}
