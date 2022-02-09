@@ -332,7 +332,6 @@ impl masterpb::master_server::Master for Server {
         if stream_info.state != SegmentState::Sealed {
             stream_info.state = SegmentState::Sealed;
         }
-        println!("stream_info state {:?}", stream_info.state);
 
         Ok(Response::new(masterpb::SealSegmentResponse {}))
     }
