@@ -35,6 +35,9 @@ service SegmentStore {
 
     // Read some entries from a segment.
     rpc Read(ReadRequest) returns (stream ReadResponse);
+
+    // Seal the corresponding segment so that any request with small epoch will be rejected.
+    rpc Seal(SealRequest) returns (SealResponse);
 }
 
 message StoreRequest {
@@ -69,4 +72,18 @@ message ReadRequest {
 message ReadResponse {
     uint32 index = 1;
     Entry entry = 2;
+}
+
+message SealRequest {
+    uint64 stream_id = 1;
+    uint32 seg_epoch = 2;
+
+    // The epoch of writer.
+    uint32 epoch = 3;
+}
+
+message SealResponse {
+    // The acked index this replica already known.  This field is used to help
+    // determine the starting position of log entries that need recovery.
+    uint32 acked_index = 1;
 }

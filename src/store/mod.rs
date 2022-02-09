@@ -56,10 +56,11 @@ impl serverpb::segment_store_server::SegmentStore for Server {
         store.store(
             req.stream_id,
             req.seg_epoch,
+            req.epoch,
             req.acked_seq,
             req.first_index,
             req.entries.into_iter().map(Into::into).collect(),
-        );
+        )?;
 
         // TODO(w41ter) ensure previous sequences is acked.
         Ok(Response::new(serverpb::StoreResponse { persisted_seq }))
@@ -78,6 +79,16 @@ impl serverpb::segment_store_server::SegmentStore for Server {
             req.limit as usize,
         )?;
         Ok(Response::new(stream))
+    }
+
+    async fn seal(
+        &self,
+        input: Request<serverpb::SealRequest>,
+    ) -> Result<Response<serverpb::SealResponse>, Status> {
+        let req = input.into_inner();
+        let mut store = self.store.lock().await;
+        let acked_index = store.seal(req.stream_id, req.seg_epoch, req.epoch)?;
+        Ok(Response::new(serverpb::SealResponse { acked_index }))
     }
 }
 
@@ -112,6 +123,15 @@ impl Client {
     ) -> crate::Result<Streaming<serverpb::ReadResponse>> {
         let mut client = self.client.clone();
         let resp = client.read(input).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn seal(
+        &self,
+        input: serverpb::SealRequest,
+    ) -> crate::Result<serverpb::SealResponse> {
+        let mut client = self.client.clone();
+        let resp = client.seal(input).await?;
         Ok(resp.into_inner())
     }
 }
@@ -245,6 +265,103 @@ mod tests {
             assert_eq!(got.len(), test.expect.len());
             assert!(got.iter().zip(test.expect.iter()).all(|(l, r)| l == r));
         }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_staled_sealing_request() -> crate::Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let local_addr = listener.local_addr()?;
+        tokio::task::spawn(async move {
+            let server = Server::new();
+            tonic::transport::Server::builder()
+                .add_service(server.into_service())
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+
+        let client = Client::connect(&local_addr.to_string()).await?;
+        client
+            .seal(serverpb::SealRequest {
+                stream_id: 1,
+                seg_epoch: 1,
+                epoch: 3,
+            })
+            .await?;
+
+        match client
+            .seal(serverpb::SealRequest {
+                stream_id: 1,
+                seg_epoch: 1,
+                epoch: 2,
+            })
+            .await
+        {
+            Err(crate::Error::Staled(_)) => {}
+            _ => {
+                panic!("should reject staled sealing request");
+            }
+        };
+
+        client
+            .seal(serverpb::SealRequest {
+                stream_id: 1,
+                seg_epoch: 1,
+                epoch: 4,
+            })
+            .await?;
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_staled_store_if_sealed() -> crate::Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let local_addr = listener.local_addr()?;
+        tokio::task::spawn(async move {
+            let server = Server::new();
+            tonic::transport::Server::builder()
+                .add_service(server.into_service())
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+
+        let client = Client::connect(&local_addr.to_string()).await?;
+        let store_req = serverpb::StoreRequest {
+            stream_id: 1,
+            seg_epoch: 1,
+            epoch: 1,
+            acked_seq: 0,
+            first_index: 0,
+            entries: vec![entry(vec![0u8]), entry(vec![2u8]), entry(vec![4u8])],
+        };
+        client.store(store_req).await?;
+
+        client
+            .seal(serverpb::SealRequest {
+                stream_id: 1,
+                seg_epoch: 1,
+                epoch: 3,
+            })
+            .await?;
+
+        let store_req = serverpb::StoreRequest {
+            stream_id: 1,
+            seg_epoch: 1,
+            epoch: 1,
+            acked_seq: encode(1, 2),
+            first_index: 3,
+            entries: vec![entry(vec![6u8]), entry(vec![8u8])],
+        };
+        match client.store(store_req).await {
+            Err(crate::Error::Staled(_)) => {}
+            _ => {
+                panic!("should reject staled store request");
+            }
+        };
+
         Ok(())
     }
 }

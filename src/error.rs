@@ -28,6 +28,8 @@ pub enum Error {
     InvalidArgument(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error("{0} is staled")]
+    Staled(String),
     #[error(transparent)]
     Unknown(Box<dyn std::error::Error + Send>),
 }
@@ -53,6 +55,7 @@ impl From<tonic::Status> for Error {
             tonic::Code::NotFound => Error::NotFound(s.message().into()),
             tonic::Code::AlreadyExists => Error::AlreadyExists(s.message().into()),
             tonic::Code::InvalidArgument => Error::InvalidArgument(s.message().into()),
+            tonic::Code::FailedPrecondition => Error::Staled(s.message().into()),
             _ => Error::Unknown(Box::new(s)),
         }
     }
@@ -73,6 +76,7 @@ impl From<Error> for tonic::Status {
             Error::InvalidArgument(s) => (tonic::Code::InvalidArgument, s),
             Error::Io(s) => (tonic::Code::Unknown, s.to_string()),
             Error::Unknown(s) => (tonic::Code::Unknown, s.to_string()),
+            Error::Staled(s) => (tonic::Code::FailedPrecondition, s),
         };
         tonic::Status::new(code, message)
     }
