@@ -1112,6 +1112,22 @@ pub(crate) fn order_worker(opt: WorkerOption, exit_flag: Arc<AtomicBool>) {
     Worker::new(opt).run(exit_flag);
 }
 
+mod recovery {
+    use super::{Channel, MemStore};
+    use crate::SegmentMeta;
+
+    pub struct RecoveryContext {
+        segment_meta: SegmentMeta,
+        mem_store: MemStore,
+        channel: Channel,
+    }
+
+    #[allow(dead_code)]
+    async fn recovery(ctx: RecoveryContext) {
+        // TODO
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;

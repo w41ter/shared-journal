@@ -20,6 +20,7 @@ use std::{
 };
 
 use futures::Stream;
+use log::warn;
 use tonic::Status;
 
 use crate::{serverpb, Entry, Sequence};
@@ -34,6 +35,7 @@ struct Replica {
     acked_index: Option<u32>,
     wakers: Vec<Waker>,
     entries: BTreeMap<u32, Entry>,
+    sealed: Option<u32>,
 }
 
 impl Replica {
@@ -43,10 +45,15 @@ impl Replica {
             acked_index: None,
             wakers: Vec::new(),
             entries: BTreeMap::new(),
+            sealed: None,
         }
     }
 
     fn store(&mut self, first_index: u32, entries: Vec<Entry>) -> Result<(), Status> {
+        // TODO(w41ter)
+        //  1. check staled request
+        //  2. truncate other entries if it receive a bridge entry.
+        //  3. wake up reader's if it is sealed? (eg, bridge entry is acked)
         for (off, entry) in entries.into_iter().enumerate() {
             let index = first_index + (off as u32);
             if self.bridge.map(|idx| index > idx).unwrap_or_default() {
@@ -168,6 +175,7 @@ impl Store {
         &mut self,
         stream_id: u64,
         seg_epoch: u32,
+        writer_epoch: u32,
         acked_seq: u64,
         first_index: u32,
         entries: Vec<Entry>,
@@ -183,6 +191,16 @@ impl Store {
         });
 
         let mut replica = replica.lock().unwrap();
+        if let Some(epoch) = replica.sealed {
+            if writer_epoch < epoch {
+                warn!(
+                    "stream {} seg {} reject staled store request, writer epoch is {}, sealed epoch is {}",
+                    stream_id, seg_epoch, writer_epoch, epoch
+                );
+                return Err(Status::failed_precondition("epoch is staled"));
+            }
+        }
+
         let mut updated = false;
         if !entries.is_empty() {
             updated = true;
@@ -225,5 +243,36 @@ impl Store {
             finished: limit == 0,
             replica: replica.clone(),
         })
+    }
+
+    pub fn seal(
+        &mut self,
+        stream_id: u64,
+        seg_epoch: u32,
+        writer_epoch: u32,
+    ) -> Result<u32, Status> {
+        let stream = self
+            .streams
+            .entry(stream_id)
+            .or_insert_with(|| Box::new(PartialStream::new()));
+
+        let replica = stream.replicas.entry(seg_epoch).or_insert_with(|| {
+            stream.epochs.insert(seg_epoch);
+            Arc::new(Mutex::new(Replica::new()))
+        });
+
+        let mut replica = replica.lock().unwrap();
+        if let Some(epoch) = replica.sealed {
+            if epoch > writer_epoch {
+                warn!(
+                    "stream {} seg {} reject staled sealing request, writer epoch is {}, sealed epoch is {}",
+                    stream_id, seg_epoch, writer_epoch, epoch
+                );
+                return Err(Status::failed_precondition("epoch is sealed"));
+            }
+        }
+
+        replica.sealed = Some(writer_epoch);
+        Ok(replica.acked_index.unwrap_or_default())
     }
 }

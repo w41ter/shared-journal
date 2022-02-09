@@ -110,12 +110,17 @@ struct ReplicaMeta {
 }
 
 #[cfg(test)]
+#[ctor::ctor]
+fn init() {
+    pretty_env_logger::init();
+}
+
+#[cfg(test)]
 mod tests {
     use log::{error, info, warn};
 
     #[test]
     fn log() {
-        pretty_env_logger::init();
         info!("such information");
         warn!("o_O");
         error!("much error");
