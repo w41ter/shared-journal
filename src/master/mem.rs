@@ -24,7 +24,7 @@ use tokio::sync::Mutex;
 use tonic::{transport::Channel, Request, Response, Status};
 
 use super::ObserverMeta;
-use crate::{masterpb, Role, INITIAL_EPOCH};
+use crate::{masterpb, Role, SegmentState, INITIAL_EPOCH};
 
 #[derive(Debug)]
 #[allow(unused)]
@@ -100,6 +100,7 @@ struct StreamInfo {
 
     /// The latest allocated epoch of this stream.
     epoch: u32,
+    state: SegmentState,
 
     switch_policy: Option<SwitchPolicy>,
 
@@ -115,6 +116,7 @@ impl StreamInfo {
             stream_id,
             stream_name,
             epoch: INITIAL_EPOCH,
+            state: SegmentState::Appending,
             switch_policy: Some(SwitchPolicy::Threshold(ThresholdSwitching::new())),
             segments: HashMap::new(),
             leader: None,
@@ -192,7 +194,7 @@ impl MasterConfig {
     }
 }
 
-struct MasterInner {
+struct MasterCore {
     config: MasterConfig,
     stream_meta: HashMap<String, u64>,
     streams: HashMap<u64, StreamInfo>,
@@ -200,7 +202,7 @@ struct MasterInner {
 }
 
 pub(crate) struct Server {
-    inner: Arc<Mutex<MasterInner>>,
+    core: Arc<Mutex<MasterCore>>,
 }
 
 #[allow(dead_code)]
@@ -215,7 +217,7 @@ impl Server {
             .map(|(k, v)| (*v, StreamInfo::new(*v, k.clone())))
             .collect();
         Server {
-            inner: Arc::new(Mutex::new(MasterInner {
+            core: Arc::new(Mutex::new(MasterCore {
                 config,
                 stream_meta,
                 replicas,
@@ -238,8 +240,8 @@ impl masterpb::master_server::Master for Server {
         input: Request<masterpb::GetStreamRequest>,
     ) -> Result<Response<masterpb::GetStreamResponse>, Status> {
         let req = input.into_inner();
-        let inner = self.inner.lock().await;
-        match inner.stream_meta.get(&req.stream_name) {
+        let core = self.core.lock().await;
+        match core.stream_meta.get(&req.stream_name) {
             Some(s) => Ok(Response::new(masterpb::GetStreamResponse { stream_id: *s })),
             None => Err(Status::not_found("no such stream exists")),
         }
@@ -250,11 +252,17 @@ impl masterpb::master_server::Master for Server {
         input: Request<masterpb::GetSegmentRequest>,
     ) -> Result<Response<masterpb::GetSegmentResponse>, Status> {
         let req = input.into_inner();
-        let inner = self.inner.lock().await;
-        match inner.stream_meta.get(&req.stream_name) {
+        let core = self.core.lock().await;
+        match core.stream_meta.get(&req.stream_name) {
             Some(s) => Ok(Response::new(masterpb::GetSegmentResponse {
                 stream_id: *s,
-                copy_set: inner.replicas.clone(),
+                copy_set: core.replicas.clone(),
+                state: core
+                    .streams
+                    .get(s)
+                    .map(|si| si.state)
+                    .unwrap_or_default()
+                    .into(),
             })),
             None => Err(Status::not_found("no such stream exists")),
         }
@@ -279,14 +287,14 @@ impl masterpb::master_server::Master for Server {
             last_heartbeat: Instant::now(),
         };
 
-        let mut inner = self.inner.lock().await;
-        let mut inner = inner.deref_mut();
-        let stream_id = match inner.stream_meta.get(&stream_name) {
+        let mut core = self.core.lock().await;
+        let mut core = core.deref_mut();
+        let stream_id = match core.stream_meta.get(&stream_name) {
             Some(id) => *id,
             None => return Err(Status::not_found("no such stream exists")),
         };
 
-        let stream = inner
+        let stream = core
             .streams
             .entry(stream_id)
             .or_insert_with(|| StreamInfo::new(stream_id, stream_name.clone()));
@@ -302,10 +310,31 @@ impl masterpb::master_server::Master for Server {
             role: req.role.into(),
             observer_id,
         };
-        let commands = apply_strategies(&inner.config, &applicant, stream);
+        let commands = apply_strategies(&core.config, &applicant, stream);
         Ok(Response::new(masterpb::HeartbeatResponse {
             commands: commands.into_iter().map(Into::into).collect(),
         }))
+    }
+
+    async fn seal_segment(
+        &self,
+        input: Request<masterpb::SealSegmentRequest>,
+    ) -> Result<Response<masterpb::SealSegmentResponse>, Status> {
+        let req = input.into_inner();
+        let stream_id = req.stream_id;
+
+        let mut core = self.core.lock().await;
+        let stream_info = match core.streams.get_mut(&stream_id) {
+            Some(si) => si,
+            None => return Err(Status::not_found("no such stream exists")),
+        };
+
+        if stream_info.state != SegmentState::Sealed {
+            stream_info.state = SegmentState::Sealed;
+        }
+        println!("stream_info state {:?}", stream_info.state);
+
+        Ok(Response::new(masterpb::SealSegmentResponse {}))
     }
 }
 
@@ -349,6 +378,15 @@ impl Client {
     ) -> crate::Result<masterpb::HeartbeatResponse> {
         let mut client = self.client.clone();
         let resp = client.heartbeat(input).await?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn seal_segment(
+        &self,
+        input: masterpb::SealSegmentRequest,
+    ) -> crate::Result<masterpb::SealSegmentResponse> {
+        let mut client = self.client.clone();
+        let resp = client.seal_segment(input).await?;
         Ok(resp.into_inner())
     }
 }
