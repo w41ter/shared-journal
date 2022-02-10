@@ -198,6 +198,9 @@ pub(crate) enum Command {
         #[derivative(Debug = "ignore")]
         sender: oneshot::Sender<EpochState>,
     },
+    Recovered {
+        epoch: u32,
+    },
 }
 
 #[allow(unused)]
@@ -1072,6 +1075,9 @@ impl Worker {
                     Command::EpochState { sender } => {
                         sender.send(state_machine.epoch_state());
                     }
+                    Command::Recovered { epoch: _ } => {
+                        todo!("recovery");
+                    }
                 }
             }
 
@@ -1123,8 +1129,13 @@ mod recovery {
     use futures::{stream, Stream, StreamExt, TryStreamExt};
     use tonic::Streaming;
 
-    use super::{Channel, MemStore, WriterGroup};
-    use crate::{serverpb, store::Client, Entry, Error, Result, SegmentMeta};
+    use super::{Channel, Command, MemStore, WriterGroup};
+    use crate::{
+        master::{Master, RemoteMaster},
+        serverpb,
+        store::{segment::WriteRequest, Client},
+        Entry, Error, Result, SegmentMeta,
+    };
 
     pub struct RecoveryContext {
         /// The epoch current leader belongs to.
@@ -1132,13 +1143,17 @@ mod recovery {
         segment_meta: SegmentMeta,
         mem_store: MemStore,
         channel: Channel,
+        master: RemoteMaster,
         writer_group: WriterGroup,
     }
 
     #[allow(dead_code)]
     async fn recovery(mut ctx: RecoveryContext) -> Result<()> {
+        // TODO(w41ter) if mem_store exists, we don't need to read pending entries from
+        // servers.
+
         let acked_index = seal(ctx.writer_epoch, &mut ctx.writer_group).await?;
-        let _ = read_pending_entries(
+        let mut entries_stream = read_pending_entries(
             ctx.segment_meta.stream_id,
             ctx.segment_meta.epoch,
             ctx.writer_epoch,
@@ -1146,7 +1161,52 @@ mod recovery {
             &ctx.segment_meta.copy_set,
         )
         .await?;
-        todo!("try broadcast entries to stores")
+
+        // FIXME(w41ter) found a efficient implementation.
+        let batch_threshold = 10;
+        let mut buf = vec![];
+        let mut next_index = acked_index + 1;
+        while let Some(entry) = entries_stream.next().await {
+            let entry = entry?;
+            buf.push(entry);
+            if buf.len() > batch_threshold {
+                // broadcast entries to ...
+                let first_index = next_index;
+                next_index += buf.len() as u32;
+                broadcast_entries(&mut ctx, next_index, std::mem::take(&mut buf)).await;
+            }
+        }
+        if !buf.is_empty() {
+            broadcast_entries(&mut ctx, next_index, std::mem::take(&mut buf)).await;
+        }
+
+        ctx.master.seal_segment(ctx.segment_meta.stream_id).await?;
+
+        ctx.channel.submit(Command::Recovered {
+            epoch: ctx.writer_group.epoch(),
+        });
+        Ok(())
+    }
+
+    async fn broadcast_entries(ctx: &mut RecoveryContext, next_index: u32, entries: Vec<Entry>) {
+        let mut futures = vec![];
+        let seg_epoch = ctx.writer_group.epoch();
+        let acked_seq = (seg_epoch as u64) << 32 | (next_index as u64 + entries.len() as u64);
+        for (target, writer) in &mut ctx.writer_group.writers {
+            let write = WriteRequest {
+                epoch: ctx.writer_epoch,
+                index: next_index,
+                acked: acked_seq,
+                entries: entries.clone(),
+            };
+            futures.push(writer.store(write));
+        }
+        stream::iter(futures)
+            .for_each_concurrent(None, |f| async move {
+                // FIXME(w41ter) handle error
+                f.await.unwrap();
+            })
+            .await;
     }
 
     // TODO(w41ter) the codes below is duplicated with
@@ -1304,6 +1364,7 @@ mod recovery {
                                 Entry::Event { epoch, event } => {
                                     // TODO(w41ter) take instead of clone.
                                     return Poll::Ready(Some(Ok(Entry::Event {
+                                        // Update entry's epoch to writer_epoch.
                                         epoch: this.epoch,
                                         event: event.clone(),
                                     })));
