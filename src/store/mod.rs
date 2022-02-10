@@ -256,6 +256,7 @@ mod tests {
                 seg_epoch: 1,
                 start_index: test.from,
                 limit: test.limit,
+                include_pending_entries: true,
             };
             let mut stream = client.read(req).await?;
             let mut got = Vec::<Entry>::new();
