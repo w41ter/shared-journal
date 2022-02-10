@@ -82,6 +82,10 @@ pub enum Command {
         role: Role,
         epoch: u32,
         leader: String,
+
+        /// It indicates that the segments need recovery, has not been sealed
+        /// yet.
+        pending_epochs: Vec<u32>,
     },
 }
 
@@ -136,6 +140,7 @@ mod remote {
                     role: cmd.role.into(),
                     epoch: cmd.epoch,
                     leader: cmd.leader,
+                    pending_epochs: cmd.pending_epochs,
                 },
             }
         }
@@ -149,16 +154,19 @@ mod remote {
                     epoch: 0,
                     role: crate::Role::Follower.into(),
                     leader: "".into(),
+                    pending_epochs: Vec::default(),
                 },
                 super::Command::Promote {
                     role,
                     epoch,
                     leader,
+                    pending_epochs,
                 } => masterpb::Command {
                     command_type: masterpb::CommandType::Promote as i32,
                     epoch,
                     role: role.into(),
                     leader,
+                    pending_epochs,
                 },
             }
         }
@@ -460,7 +468,8 @@ pub(crate) mod tests {
             super::Command::Promote {
                 role,
                 epoch,
-                leader: _
+                leader: _,
+                pending_epochs: _,
             }
             if *epoch == 1 && *role == Role::Leader
         ));

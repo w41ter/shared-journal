@@ -25,6 +25,7 @@ use std::{
 
 use bitflags::bitflags;
 use futures::channel::oneshot;
+use log::warn;
 use tokio::{runtime::Handle as RuntimeHandle, sync::mpsc::UnboundedSender};
 
 use super::EpochState;
@@ -186,6 +187,7 @@ pub(crate) enum Command {
         epoch: u32,
         leader: String,
         copy_set: Vec<String>,
+        pending_epochs: Vec<u32>,
     },
     Msg(Message),
     Proposal {
@@ -199,7 +201,8 @@ pub(crate) enum Command {
         sender: oneshot::Sender<EpochState>,
     },
     Recovered {
-        epoch: u32,
+        seg_epoch: u32,
+        writer_epoch: u32,
     },
 }
 
@@ -237,6 +240,7 @@ struct Ready {
     still_active: bool,
     acked_seq: Sequence,
 
+    pending_epoch: Option<u32>,
     pending_messages: Vec<Message>,
 }
 
@@ -250,6 +254,7 @@ bitflags! {
 #[allow(unused)]
 struct StreamStateMachine {
     name: String,
+    stream_id: u64,
     epoch: u32,
     role: Role,
     leader: String,
@@ -262,13 +267,16 @@ struct StreamStateMachine {
     ready: Ready,
 
     flags: Flags,
+
+    pending_epochs: Vec<u32>,
 }
 
 #[allow(unused)]
 impl StreamStateMachine {
-    fn new(name: String) -> Self {
+    fn new(name: String, stream_id: u64) -> Self {
         StreamStateMachine {
             name,
+            stream_id,
             epoch: INITIAL_EPOCH,
             role: Role::Follower,
             leader: "".to_owned(),
@@ -279,6 +287,7 @@ impl StreamStateMachine {
             acked_seq: 0,
             ready: Ready::default(),
             flags: Flags::NONE,
+            pending_epochs: Vec::default(),
         }
     }
 
@@ -294,7 +303,14 @@ impl StreamStateMachine {
         }
     }
 
-    fn promote(&mut self, epoch: u32, role: Role, leader: String, copy_set: Vec<String>) {
+    fn promote(
+        &mut self,
+        epoch: u32,
+        role: Role,
+        leader: String,
+        copy_set: Vec<String>,
+        pending_epochs: Vec<u32>,
+    ) {
         self.epoch = epoch;
         self.state = match role {
             Role::Leader => ObserverState::Leading,
@@ -307,6 +323,12 @@ impl StreamStateMachine {
             .into_iter()
             .map(|remote| (remote, Progress::new()))
             .collect();
+        self.pending_epochs = pending_epochs;
+
+        // Sort in reverse to ensure that the smallest is at the end. See
+        // `StreamStateMachine::handle_recovered` for details.
+        self.pending_epochs.sort_by(|a, b| b.cmp(a));
+        self.ready.pending_epoch = self.pending_epochs.last().cloned();
     }
 
     fn step(&mut self, msg: Message) {
@@ -352,6 +374,11 @@ impl StreamStateMachine {
 
     fn advance(&mut self) {
         debug_assert_eq!(self.role, Role::Leader);
+        /// Don't ack any entries if there exists a pending segment.
+        if !self.pending_epochs.is_empty() {
+            return;
+        }
+
         let acked_seq = self.replication_policy.advance(self.epoch, &self.copy_set);
         if self.acked_seq < acked_seq {
             self.acked_seq = acked_seq;
@@ -436,6 +463,23 @@ impl StreamStateMachine {
                     true,
                 );
             }
+        }
+    }
+
+    fn handle_recovered(&mut self, seg_epoch: u32, writer_epoch: u32) {
+        if writer_epoch != self.epoch {
+            warn!(
+                "stream {} epoch {} receive staled recovered msg, seg epoch: {}, writer epoch: {}",
+                self.stream_id, self.epoch, seg_epoch, writer_epoch
+            );
+            return;
+        }
+
+        match self.pending_epochs.pop() {
+            Some(first_pending_epoch) if first_pending_epoch == seg_epoch => {
+                self.ready.pending_epoch = self.pending_epochs.last().cloned();
+            }
+            _ => panic!("should't happen"),
         }
     }
 }
@@ -593,6 +637,7 @@ impl Selector {
 }
 
 #[allow(unused)]
+#[derive(Clone)]
 struct WriterGroup {
     /// The epoch of segment this writer group belongs to.
     epoch: u32,
@@ -683,6 +728,7 @@ where
             role,
             epoch,
             leader,
+            pending_epochs,
         } => match master.get_segment(stream_name, epoch).await {
             Ok(Some(segment_meta)) => {
                 channel.submit(Command::Promote {
@@ -690,6 +736,7 @@ where
                     epoch,
                     leader,
                     copy_set: segment_meta.copy_set,
+                    pending_epochs,
                 });
             }
             _ => {
@@ -978,7 +1025,7 @@ impl Worker {
             match act {
                 Action::Add { name, channel } => {
                     let stream_id = channel.stream_id();
-                    let state_machine = StreamStateMachine::new(name);
+                    let state_machine = StreamStateMachine::new(name, stream_id);
                     if self.streams.insert(stream_id, channel.clone()).is_some() {
                         panic!("add a channel multiple times");
                     }
@@ -1059,6 +1106,7 @@ impl Worker {
                         role,
                         leader,
                         copy_set,
+                        pending_epochs,
                     } => {
                         /// TODO(w41ter) since the epoch has already promoted,
                         /// the former one needs to be gc.
@@ -1066,7 +1114,7 @@ impl Worker {
                             (channel.stream_id(), epoch),
                             WriterGroup::new(channel.stream_id(), epoch, copy_set.clone()),
                         );
-                        state_machine.promote(epoch, role, leader, copy_set);
+                        state_machine.promote(epoch, role, leader, copy_set, pending_epochs);
                         let state_observer = self.state_observers.get_mut(&stream_id);
                         if let Some(sender) = state_observer {
                             sender.send(state_machine.epoch_state());
@@ -1075,8 +1123,11 @@ impl Worker {
                     Command::EpochState { sender } => {
                         sender.send(state_machine.epoch_state());
                     }
-                    Command::Recovered { epoch: _ } => {
-                        todo!("recovery");
+                    Command::Recovered {
+                        seg_epoch,
+                        writer_epoch,
+                    } => {
+                        state_machine.handle_recovered(seg_epoch, writer_epoch);
                     }
                 }
             }
@@ -1093,6 +1144,15 @@ impl Worker {
                     ready.pending_messages,
                 );
                 applier.might_advance(ready.acked_seq);
+                if let Some(pending_epoch) = ready.pending_epoch {
+                    recovery::submit(
+                        state_machine.name.clone(),
+                        state_machine.epoch,
+                        pending_epoch,
+                        channel.clone(),
+                        self.master.clone(),
+                    );
+                }
                 if ready.still_active {
                     // TODO(w41ter) support still active
                     continue;
@@ -1147,6 +1207,38 @@ mod recovery {
         writer_group: WriterGroup,
     }
 
+    pub(super) fn submit(
+        stream_name: String,
+        writer_epoch: u32,
+        seg_epoch: u32,
+        channel: Channel,
+        master: RemoteMaster,
+    ) {
+        tokio::spawn(async move {
+            // TODO(w41ter) handle error.
+            let segment_meta = master
+                .get_segment(&stream_name, seg_epoch)
+                .await
+                .expect("handle error")
+                .unwrap();
+
+            let writer_group = WriterGroup::new(
+                channel.stream_id(),
+                seg_epoch,
+                segment_meta.copy_set.clone(),
+            );
+            let ctx = RecoveryContext {
+                writer_epoch,
+                writer_group,
+                mem_store: MemStore::new(seg_epoch),
+                segment_meta,
+                channel,
+                master,
+            };
+            recovery(ctx).await.unwrap();
+        });
+    }
+
     #[allow(dead_code)]
     async fn recovery(mut ctx: RecoveryContext) -> Result<()> {
         // TODO(w41ter) if mem_store exists, we don't need to read pending entries from
@@ -1183,7 +1275,8 @@ mod recovery {
         ctx.master.seal_segment(ctx.segment_meta.stream_id).await?;
 
         ctx.channel.submit(Command::Recovered {
-            epoch: ctx.writer_group.epoch(),
+            seg_epoch: ctx.writer_group.epoch(),
+            writer_epoch: ctx.writer_epoch,
         });
         Ok(())
     }
@@ -1633,6 +1726,7 @@ mod tests {
             role: Role::Follower,
             leader: "leader_1".to_string(),
             copy_set: vec![],
+            pending_epochs: vec![],
         });
 
         let second_epoch_state = receiver.recv().await.unwrap();
@@ -1647,6 +1741,7 @@ mod tests {
             role: Role::Leader,
             leader: "leader_2".to_string(),
             copy_set: vec![],
+            pending_epochs: vec![],
         });
         let third_epoch_state = receiver.recv().await.unwrap();
         assert_eq!(third_epoch_state.epoch, new_epoch as u64);

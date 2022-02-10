@@ -144,10 +144,12 @@ impl StreamInfo {
     fn reset_leader(&mut self, applicant: &PolicyApplicant) -> super::Command {
         self.epoch += 1;
         self.leader = Some(applicant.observer_id.clone());
+        // TODO(w41ter) set pending epochs.
         super::Command::Promote {
             role: Role::Leader,
             epoch: self.epoch,
             leader: applicant.observer_id.clone(),
+            pending_epochs: vec![],
         }
     }
 }

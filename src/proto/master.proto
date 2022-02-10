@@ -48,6 +48,7 @@ message Command {
     uint32 epoch = 2;
     Role role = 3;
     string leader = 4;
+    repeated uint32 pending_epochs = 5;
 }
 
 service Master {
