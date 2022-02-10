@@ -1120,14 +1120,15 @@ mod recovery {
         task::{Context, Poll},
     };
 
-    use futures::{stream, StreamExt};
+    use futures::{stream, Stream, StreamExt, TryStreamExt};
+    use tonic::Streaming;
 
     use super::{Channel, MemStore, WriterGroup};
-    use crate::{Error, Result, SegmentMeta};
+    use crate::{serverpb, store::Client, Entry, Error, Result, SegmentMeta};
 
     pub struct RecoveryContext {
         /// The epoch current leader belongs to.
-        epoch: u32,
+        writer_epoch: u32,
         segment_meta: SegmentMeta,
         mem_store: MemStore,
         channel: Channel,
@@ -1136,9 +1137,191 @@ mod recovery {
 
     #[allow(dead_code)]
     async fn recovery(mut ctx: RecoveryContext) -> Result<()> {
-        let acked_index = seal(ctx.epoch, &mut ctx.writer_group).await?;
-        let _ = acked_index;
-        todo!("try read un-acked entries")
+        let acked_index = seal(ctx.writer_epoch, &mut ctx.writer_group).await?;
+        let _ = read_pending_entries(
+            ctx.segment_meta.stream_id,
+            ctx.segment_meta.epoch,
+            ctx.writer_epoch,
+            acked_index,
+            &ctx.segment_meta.copy_set,
+        )
+        .await?;
+        todo!("try broadcast entries to stores")
+    }
+
+    // TODO(w41ter) the codes below is duplicated with
+    // `store::segment::CompoundSegmentReader`, and need to abstract and rewrite.
+
+    async fn read_pending_entries(
+        stream_id: u64,
+        seg_epoch: u32,
+        writer_epoch: u32,
+        acked_index: u32,
+        copy_set: &[String],
+    ) -> Result<CompoundSegmentReader> {
+        let mut streamings = vec![];
+        for addr in copy_set {
+            let client = Client::connect(addr).await?;
+            let req = serverpb::ReadRequest {
+                stream_id,
+                seg_epoch,
+                start_index: acked_index + 1,
+                include_pending_entries: false,
+                limit: 0,
+            };
+            streamings.push(client.read(req).await?);
+        }
+        Ok(CompoundSegmentReader::new(
+            writer_epoch,
+            acked_index,
+            streamings,
+        ))
+    }
+
+    #[derive(Debug, Clone)]
+    enum ReaderState {
+        None,
+        Polling,
+        Ready { index: u32, entry: Entry },
+        Done,
+    }
+
+    struct Reader {
+        state: ReaderState,
+        entries_stream: Streaming<serverpb::ReadResponse>,
+    }
+
+    /// Read and select pending entries, a bridge record will be appended to the
+    /// end of stream.
+    pub(crate) struct CompoundSegmentReader {
+        ready_count: usize,
+        done_count: usize,
+        next_index: u32,
+        epoch: u32,
+        bridge_entry: Option<Entry>,
+        readers: Vec<Reader>,
+    }
+
+    #[allow(dead_code)]
+    impl CompoundSegmentReader {
+        fn new(
+            epoch: u32,
+            acked_index: u32,
+            streams: Vec<Streaming<serverpb::ReadResponse>>,
+        ) -> Self {
+            CompoundSegmentReader {
+                ready_count: 0,
+                done_count: 0,
+                next_index: acked_index + 1,
+                epoch,
+                bridge_entry: Some(Entry::Bridge { epoch }),
+                readers: streams
+                    .into_iter()
+                    .map(|stream| Reader {
+                        state: ReaderState::None,
+                        entries_stream: stream,
+                    })
+                    .collect(),
+            }
+        }
+
+        fn step(&mut self, cx: &mut Context<'_>) -> Result<()> {
+            for reader in &mut self.readers {
+                if let ReaderState::None = &reader.state {
+                    let mut try_next = reader.entries_stream.try_next();
+                    match Pin::new(&mut try_next).poll(cx) {
+                        Poll::Pending => {
+                            reader.state = ReaderState::Polling;
+                        }
+                        Poll::Ready(Ok(Some(resp))) => {
+                            self.ready_count += 1;
+                            reader.state = ReaderState::Ready {
+                                index: resp.index,
+                                entry: resp.entry.unwrap().into(),
+                            };
+                        }
+                        Poll::Ready(Ok(None)) => {
+                            self.done_count += 1;
+                            reader.state = ReaderState::Done;
+                        }
+                        Poll::Ready(Err(err)) => {
+                            return Err(err.into());
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        fn active_count(&self) -> usize {
+            self.ready_count + self.done_count
+        }
+    }
+
+    impl Stream for CompoundSegmentReader {
+        type Item = Result<Entry>;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let this = self.get_mut();
+            loop {
+                let before_active = this.active_count();
+                match this.step(cx) {
+                    Err(err) => return Poll::Ready(Some(Err(err))),
+                    Ok(()) if this.active_count() == before_active => return Poll::Pending,
+                    _ => {}
+                };
+
+                let policy_threshold = 1;
+
+                // Already done, generate a bridge record.
+                if this.done_count >= policy_threshold {
+                    return Poll::Ready(std::mem::take(&mut this.bridge_entry).map(Ok));
+                }
+
+                if this.ready_count >= policy_threshold {
+                    // Enough count, try advance
+                    // 1. found matched index
+                    let entry = this
+                        .readers
+                        .iter()
+                        .filter_map(|reader| match &reader.state {
+                            ReaderState::Ready { index, entry } if *index == this.next_index => {
+                                Some(entry)
+                            }
+                            _ => None,
+                        })
+                        .fold(Option::<&Entry>::None, |sum, item| match sum {
+                            Some(entry) if entry.epoch() > item.epoch() => sum,
+                            _ => Some(item),
+                        });
+
+                    // skip to next
+                    this.next_index += 1;
+                    match entry {
+                        Some(entry) => {
+                            match entry {
+                                Entry::Hole => panic!("shouldn't receive hole from store"),
+                                Entry::Event { epoch, event } => {
+                                    // TODO(w41ter) take instead of clone.
+                                    return Poll::Ready(Some(Ok(Entry::Event {
+                                        epoch: this.epoch,
+                                        event: event.clone(),
+                                    })));
+                                }
+                                Entry::Bridge { epoch } => {
+                                    // This mean the latest entry.
+                                    this.done_count = policy_threshold;
+                                    return Poll::Ready(
+                                        std::mem::take(&mut this.bridge_entry).map(Ok),
+                                    );
+                                }
+                            }
+                        }
+                        None => return Poll::Ready(Some(Ok(Entry::Hole))),
+                    }
+                }
+            }
+        }
     }
 
     struct Seal<T> {

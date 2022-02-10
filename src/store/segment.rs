@@ -142,6 +142,7 @@ impl SegmentReaderBuilder {
                     seg_epoch: self.epoch,
                     start_index: start,
                     limit,
+                    include_pending_entries: false,
                 };
                 client.read(req).await?
             }
@@ -389,6 +390,7 @@ pub(crate) async fn build_compound_segment_reader(
             stream_id,
             seg_epoch: epoch,
             start_index: start.unwrap_or(1),
+            include_pending_entries: false,
             limit: 0,
         };
         streamings.push(client.read(req).await?);

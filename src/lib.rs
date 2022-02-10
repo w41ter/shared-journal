@@ -55,6 +55,17 @@ enum Entry {
     Bridge { epoch: u32 },
 }
 
+impl Entry {
+    // FIXME(w41ter) a better implementation.
+    pub fn epoch(&self) -> u32 {
+        match self {
+            Entry::Event { epoch, event: _ } => *epoch,
+            Entry::Bridge { epoch } => *epoch,
+            _ => panic!("Entry::Hole no epoch field"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SegmentState {
     /// This segment is receiving new appends.
