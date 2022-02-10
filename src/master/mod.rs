@@ -587,4 +587,4 @@ pub(crate) mod tests {
     }
 }
 
-pub use self::remote::{MetaStream, RemoteMaster};
+pub use self::remote::{MetaStream, RemoteMaster, ListStream as ListRemoteStream};

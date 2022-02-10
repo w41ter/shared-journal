@@ -23,7 +23,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use futures::{channel::oneshot, Stream};
+use futures::{channel::oneshot, ready, Stream};
 use stream::{StreamReader, StreamWriter};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
@@ -55,14 +55,16 @@ pub struct EpochState {
     pub leader: Option<String>,
 }
 
-#[derive(Debug)]
-pub struct StreamLister {}
+pub struct StreamLister {
+    streaming: crate::master::ListRemoteStream,
+}
 
 impl Stream for StreamLister {
     type Item = Result<String>;
 
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        todo!();
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let item = ready!(Pin::new(&mut self.get_mut().streaming).poll_next(cx));
+        Poll::Ready(item.map(|item| item.map(|meta| meta.stream_name)))
     }
 }
 
@@ -121,7 +123,8 @@ impl Journal {
 
     /// Lists streams.
     pub async fn list_streams(&self) -> Result<StreamLister> {
-        todo!();
+        let streaming = self.master.list_stream().await?;
+        Ok(StreamLister { streaming })
     }
 
     /// Creates a stream.
