@@ -151,8 +151,8 @@ impl Journal {
     }
 
     /// Returns a stream reader.
-    pub async fn new_stream_reader(&self, name: &str) -> Result<StreamReader> {
-        todo!();
+    pub async fn new_stream_reader(&self, stream_name: &str) -> Result<StreamReader> {
+        Ok(StreamReader::new(stream_name, self.master.clone()))
     }
 
     /// Returns a stream writer.

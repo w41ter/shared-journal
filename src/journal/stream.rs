@@ -35,6 +35,16 @@ pub struct StreamReader {
 
 #[allow(dead_code)]
 impl StreamReader {
+    pub fn new(stream_name: &str, master: RemoteMaster) -> Self {
+        StreamReader {
+            stream_name: stream_name.to_string(),
+            current_epoch: 0,
+            start_index: None,
+            segment_reader: None,
+            master,
+        }
+    }
+
     async fn switch_segment(&mut self) -> Result<()> {
         let segment_meta = self
             .master
