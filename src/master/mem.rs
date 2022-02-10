@@ -20,8 +20,9 @@ use std::{
 };
 
 use async_trait::async_trait;
+use futures::stream;
 use tokio::sync::Mutex;
-use tonic::{transport::Channel, Request, Response, Status};
+use tonic::{transport::Channel, Request, Response, Status, Streaming};
 
 use super::ObserverMeta;
 use crate::{masterpb, Role, SegmentState, INITIAL_EPOCH};
@@ -245,6 +246,9 @@ impl Server {
 #[async_trait]
 #[allow(unused)]
 impl masterpb::master_server::Master for Server {
+    type ListStreamStream =
+        stream::Iter<<Vec<Result<masterpb::StreamMeta, Status>> as IntoIterator>::IntoIter>;
+
     async fn create_stream(
         &self,
         input: Request<masterpb::CreateStreamRequest>,
@@ -260,6 +264,24 @@ impl masterpb::master_server::Master for Server {
                 Ok(Response::new(masterpb::CreateStreamResponse {}))
             }
         }
+    }
+
+    async fn list_stream(
+        &self,
+        _input: Request<masterpb::ListStreamRequest>,
+    ) -> Result<Response<Self::ListStreamStream>, Status> {
+        let mut core = self.core.lock().await;
+        Ok(Response::new(stream::iter(
+            core.stream_meta
+                .iter()
+                .map(|(k, id)| {
+                    Ok(masterpb::StreamMeta {
+                        stream_name: k.clone(),
+                        stream_id: *id,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )))
     }
 
     async fn get_stream(
@@ -387,6 +409,14 @@ impl Client {
         let mut client = self.client.clone();
         let resp = client.create_stream(input).await?;
         Ok(resp.into_inner())
+    }
+
+    pub async fn list_stream(
+        &self,
+        input: masterpb::ListStreamRequest,
+    ) -> crate::Result<Streaming<masterpb::StreamMeta>> {
+        let mut client = self.client.clone();
+        Ok(client.list_stream(input).await?.into_inner())
     }
 
     pub async fn get_stream(
