@@ -129,8 +129,8 @@ impl Journal {
     /// # Errors
     ///
     /// Returns `Error::AlreadyExists` if the stream already exists.
-    pub async fn create_stream(&self, name: &str) -> Result<()> {
-        todo!();
+    pub async fn create_stream(&self, stream_name: &str) -> Result<()> {
+        self.master.create_stream(stream_name).await
     }
 
     /// Deletes a stream.
