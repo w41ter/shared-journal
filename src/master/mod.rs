@@ -90,9 +90,8 @@ pub enum Command {
 }
 
 /// The meta of a stream.
-#[derive(Clone)]
-#[allow(unused)]
-pub(crate) struct StreamMeta {
+#[derive(Clone, Debug)]
+pub struct StreamMeta {
     /// The internal unique ID of stream.
     pub stream_id: u64,
 
@@ -103,6 +102,7 @@ pub(crate) struct StreamMeta {
 #[async_trait]
 pub(super) trait Master: Clone {
     type MetaStream: Stream<Item = Result<SegmentMeta>>;
+    type ListStream: Stream<Item = Result<StreamMeta>>;
 
     /// Create new stream with corresponding name.
     ///
@@ -110,6 +110,9 @@ pub(super) trait Master: Clone {
     ///
     /// Returns `Error::AlreadyExists` if the stream is exist.
     async fn create_stream(&self, stream_name: &str) -> Result<()>;
+
+    /// List all streams.
+    async fn list_stream(&self) -> Result<Self::ListStream>;
 
     /// Query the meta of stream.
     async fn get_stream(&self, stream_name: &str) -> Result<Option<StreamMeta>>;
@@ -133,11 +136,26 @@ pub(super) trait Master: Clone {
 }
 
 mod remote {
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
     use async_trait::async_trait;
     use futures::Stream;
+    use tonic::Streaming;
 
     use super::{mem::Client, SegmentMeta, StreamMeta};
     use crate::{masterpb, Error, Result};
+
+    impl From<masterpb::StreamMeta> for super::StreamMeta {
+        fn from(meta: masterpb::StreamMeta) -> Self {
+            super::StreamMeta {
+                stream_id: meta.stream_id,
+                stream_name: meta.stream_name,
+            }
+        }
+    }
 
     impl From<masterpb::Command> for super::Command {
         fn from(cmd: masterpb::Command) -> Self {
@@ -207,9 +225,29 @@ mod remote {
         }
     }
 
+    pub struct ListStream {
+        streaming: Streaming<masterpb::StreamMeta>,
+    }
+
+    impl Stream for ListStream {
+        type Item = Result<StreamMeta>;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            match Pin::new(&mut self.get_mut().streaming).poll_next(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Ready(Some(item)) => match item {
+                    Ok(meta) => Poll::Ready(Some(Ok(meta.into()))),
+                    Err(err) => Poll::Ready(Some(Err(err.into()))),
+                },
+            }
+        }
+    }
+
     #[async_trait]
     #[allow(dead_code, unused)]
     impl super::Master for RemoteMaster {
+        type ListStream = ListStream;
         type MetaStream = MetaStream;
 
         async fn create_stream(&self, stream_name: &str) -> Result<()> {
@@ -219,6 +257,15 @@ mod remote {
 
             self.master_client.create_stream(req).await?;
             Ok(())
+        }
+
+        async fn list_stream(&self) -> Result<Self::ListStream> {
+            Ok(ListStream {
+                streaming: self
+                    .master_client
+                    .list_stream(masterpb::ListStreamRequest {})
+                    .await?,
+            })
         }
 
         async fn get_stream(&self, stream_name: &str) -> Result<Option<StreamMeta>> {
@@ -301,7 +348,7 @@ pub(crate) mod tests {
     use tokio::net::TcpListener;
     use tokio_stream::wrappers::TcpListenerStream;
 
-    use super::*;
+    use super::{remote::ListStream, *};
     use crate::SegmentState;
 
     #[derive(Clone)]
@@ -310,10 +357,15 @@ pub(crate) mod tests {
     #[allow(unused)]
     #[async_trait]
     impl Master for DummyMaster {
+        type ListStream = ListStream;
         type MetaStream = MetaStream;
 
         async fn create_stream(&self, stream_name: &str) -> Result<()> {
             Ok(())
+        }
+
+        async fn list_stream(&self) -> Result<Self::ListStream> {
+            todo!()
         }
 
         async fn get_stream(&self, stream_name: &str) -> Result<Option<StreamMeta>> {

@@ -51,9 +51,17 @@ message Command {
     repeated uint32 pending_epochs = 5;
 }
 
+message StreamMeta {
+    string stream_name = 1;
+    uint64 stream_id = 2;
+}
+
 service Master {
     // Create new stream.
-    rpc CreateStream(CreateStreamRequest) returns(CreateStreamResponse);
+    rpc CreateStream(CreateStreamRequest) returns (CreateStreamResponse);
+
+    // List streams
+    rpc ListStream(ListStreamRequest) returns (stream StreamMeta);
 
     // Get stream meta.
     rpc GetStream(GetStreamRequest) returns (GetStreamResponse);
@@ -69,15 +77,17 @@ service Master {
     rpc SealSegment(SealSegmentRequest) returns (SealSegmentResponse);
 }
 
-message GetStreamRequest {
-    string stream_name = 1;
-}
-
 message CreateStreamRequest {
     string stream_name = 1;
 }
 
 message CreateStreamResponse {}
+
+message ListStreamRequest {}
+
+message GetStreamRequest {
+    string stream_name = 1;
+}
 
 message GetStreamResponse {
     uint64 stream_id = 1;
