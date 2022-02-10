@@ -104,6 +104,13 @@ pub(crate) struct StreamMeta {
 pub(super) trait Master: Clone {
     type MetaStream: Stream<Item = Result<SegmentMeta>>;
 
+    /// Create new stream with corresponding name.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::AlreadyExists` if the stream is exist.
+    async fn create_stream(&self, stream_name: &str) -> Result<()>;
+
     /// Query the meta of stream.
     async fn get_stream(&self, stream_name: &str) -> Result<Option<StreamMeta>>;
 
@@ -205,9 +212,18 @@ mod remote {
     impl super::Master for RemoteMaster {
         type MetaStream = MetaStream;
 
+        async fn create_stream(&self, stream_name: &str) -> Result<()> {
+            let req = masterpb::CreateStreamRequest {
+                stream_name: stream_name.to_string(),
+            };
+
+            self.master_client.create_stream(req).await?;
+            Ok(())
+        }
+
         async fn get_stream(&self, stream_name: &str) -> Result<Option<StreamMeta>> {
             let req = masterpb::GetStreamRequest {
-                stream_name: stream_name.to_owned(),
+                stream_name: stream_name.to_string(),
             };
 
             match self.master_client.get_stream(req).await {
@@ -296,6 +312,10 @@ pub(crate) mod tests {
     impl Master for DummyMaster {
         type MetaStream = MetaStream;
 
+        async fn create_stream(&self, stream_name: &str) -> Result<()> {
+            Ok(())
+        }
+
         async fn get_stream(&self, stream_name: &str) -> Result<Option<StreamMeta>> {
             Ok(None)
         }
@@ -348,6 +368,30 @@ pub(crate) mod tests {
         });
 
         Ok(local_addr.to_string())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_stream() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let master_addr = build_master(&[]).await?;
+
+        let master = remote::RemoteMaster::new(&master_addr).await?;
+        match master.get_segment("test", 1).await? {
+            None => {}
+            Some(_) => panic!("no segment named `test` exists"),
+        }
+
+        master.create_stream("test").await?;
+        match master.get_segment("test", 1).await? {
+            Some(_) => {}
+            None => panic!("segment named `test` must exists"),
+        }
+
+        match master.create_stream("test").await {
+            Err(crate::Error::AlreadyExists(_)) => {}
+            _ => panic!("create same stream must fail"),
+        }
+
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]

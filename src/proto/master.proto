@@ -52,6 +52,9 @@ message Command {
 }
 
 service Master {
+    // Create new stream.
+    rpc CreateStream(CreateStreamRequest) returns(CreateStreamResponse);
+
     // Get stream meta.
     rpc GetStream(GetStreamRequest) returns (GetStreamResponse);
 
@@ -69,6 +72,12 @@ service Master {
 message GetStreamRequest {
     string stream_name = 1;
 }
+
+message CreateStreamRequest {
+    string stream_name = 1;
+}
+
+message CreateStreamResponse {}
 
 message GetStreamResponse {
     uint64 stream_id = 1;

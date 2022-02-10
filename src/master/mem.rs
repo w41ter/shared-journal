@@ -197,6 +197,7 @@ impl MasterConfig {
 }
 
 struct MasterCore {
+    next_stream_id: u64,
     config: MasterConfig,
     stream_meta: HashMap<String, u64>,
     streams: HashMap<u64, StreamInfo>,
@@ -218,8 +219,15 @@ impl Server {
             .iter()
             .map(|(k, v)| (*v, StreamInfo::new(*v, k.clone())))
             .collect();
+        let next_stream_id = stream_meta
+            .iter()
+            .map(|(_, v)| *v)
+            .max()
+            .unwrap_or_default()
+            + 1;
         Server {
             core: Arc::new(Mutex::new(MasterCore {
+                next_stream_id,
                 config,
                 stream_meta,
                 replicas,
@@ -237,6 +245,23 @@ impl Server {
 #[async_trait]
 #[allow(unused)]
 impl masterpb::master_server::Master for Server {
+    async fn create_stream(
+        &self,
+        input: Request<masterpb::CreateStreamRequest>,
+    ) -> Result<Response<masterpb::CreateStreamResponse>, Status> {
+        let req = input.into_inner();
+        let mut core = self.core.lock().await;
+        match core.stream_meta.get(&req.stream_name) {
+            Some(_) => Err(Status::already_exists("stream already exists")),
+            None => {
+                let stream_id = core.next_stream_id;
+                core.next_stream_id += 1;
+                core.stream_meta.insert(req.stream_name, stream_id);
+                Ok(Response::new(masterpb::CreateStreamResponse {}))
+            }
+        }
+    }
+
     async fn get_stream(
         &self,
         input: Request<masterpb::GetStreamRequest>,
@@ -353,6 +378,15 @@ impl Client {
         let addr = format!("http://{}", addr);
         let client = MasterClient::connect(addr).await?;
         Ok(Client { client })
+    }
+
+    pub async fn create_stream(
+        &self,
+        input: masterpb::CreateStreamRequest,
+    ) -> crate::Result<masterpb::CreateStreamResponse> {
+        let mut client = self.client.clone();
+        let resp = client.create_stream(input).await?;
+        Ok(resp.into_inner())
     }
 
     pub async fn get_stream(
