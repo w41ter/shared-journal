@@ -28,7 +28,7 @@ use futures::channel::oneshot;
 use log::warn;
 use tokio::{runtime::Handle as RuntimeHandle, sync::mpsc::UnboundedSender};
 
-use super::EpochState;
+use super::{EpochState, ReplicatePolicy};
 use crate::{
     master::{Command as MasterCmd, Master, RemoteMaster},
     seg_store::segment::{SegmentWriter, WriteRequest},
@@ -93,9 +93,9 @@ impl MemStore {
 ///
 /// For now, let's assume that message passing is reliable.
 #[allow(unused)]
-struct Progress {
+pub(in crate::journal) struct Progress {
     // The default value is zero, so any proposal's index should greater than zero.
-    matched_index: u32,
+    pub matched_index: u32,
     next_index: u32,
 
     start: usize,
@@ -206,34 +206,6 @@ pub(crate) enum Command {
     },
 }
 
-#[allow(unused)]
-enum ReplicationPolicy {
-    /// A simple strategy that allows ack entries as long as one copy holds the
-    /// dataset.
-    ///
-    /// This strategy is mainly used for testing.
-    Simple,
-}
-
-#[allow(unused)]
-impl ReplicationPolicy {
-    fn advance(&self, epoch: u32, progresses: &HashMap<String, Progress>) -> Sequence {
-        match self {
-            ReplicationPolicy::Simple => progresses
-                .iter()
-                .filter_map(|(_, p)| {
-                    if p.matched_index == 0 {
-                        None
-                    } else {
-                        Some(Sequence::new(epoch, p.matched_index))
-                    }
-                })
-                .max()
-                .unwrap_or_default(),
-        }
-    }
-}
-
 #[derive(Default)]
 #[allow(unused)]
 struct Ready {
@@ -261,7 +233,7 @@ struct StreamStateMachine {
     state: ObserverState,
     mem_store: MemStore,
     copy_set: HashMap<String, Progress>,
-    replication_policy: ReplicationPolicy,
+    replicate_policy: ReplicatePolicy,
 
     acked_seq: Sequence,
     ready: Ready,
@@ -283,7 +255,7 @@ impl StreamStateMachine {
             state: ObserverState::Following,
             mem_store: MemStore::new(INITIAL_EPOCH),
             copy_set: HashMap::new(),
-            replication_policy: ReplicationPolicy::Simple,
+            replicate_policy: ReplicatePolicy::Simple,
             acked_seq: Sequence::default(),
             ready: Ready::default(),
             flags: Flags::NONE,
@@ -379,7 +351,9 @@ impl StreamStateMachine {
             return;
         }
 
-        let acked_seq = self.replication_policy.advance(self.epoch, &self.copy_set);
+        let acked_seq = self
+            .replicate_policy
+            .advance_acked_sequence(self.epoch, &self.copy_set);
         if self.acked_seq < acked_seq {
             self.acked_seq = acked_seq;
             self.flags |= Flags::ACK_ADVANCED;
@@ -1145,6 +1119,7 @@ impl Worker {
                 applier.might_advance(ready.acked_seq);
                 if let Some(pending_epoch) = ready.pending_epoch {
                     recovery::submit(
+                        state_machine.replicate_policy,
                         state_machine.name.clone(),
                         state_machine.epoch,
                         pending_epoch,
@@ -1185,17 +1160,22 @@ mod recovery {
         task::{Context, Poll},
     };
 
-    use futures::{stream, Stream, StreamExt, TryStreamExt};
+    use futures::{io::Repeat, stream, Stream, StreamExt, TryStreamExt};
     use tonic::Streaming;
 
-    use super::{Channel, Command, MemStore, WriterGroup};
+    use super::{Channel, Command, MemStore, ReplicatePolicy, WriterGroup};
     use crate::{
+        journal::{
+            policy::{GroupReadPolicy, GroupState, ReaderState},
+            segment::CompoundSegmentReader,
+        },
         master::{Master, RemoteMaster},
         seg_store::{segment::WriteRequest, Client},
         storepb, Entry, Error, Result, SegmentMeta, Sequence,
     };
 
     pub struct RecoveryContext {
+        policy: ReplicatePolicy,
         /// The epoch current leader belongs to.
         writer_epoch: u32,
         segment_meta: SegmentMeta,
@@ -1206,6 +1186,7 @@ mod recovery {
     }
 
     pub(super) fn submit(
+        policy: ReplicatePolicy,
         stream_name: String,
         writer_epoch: u32,
         seg_epoch: u32,
@@ -1226,6 +1207,7 @@ mod recovery {
                 segment_meta.copy_set.clone(),
             );
             let ctx = RecoveryContext {
+                policy,
                 writer_epoch,
                 writer_group,
                 mem_store: MemStore::new(seg_epoch),
@@ -1242,8 +1224,9 @@ mod recovery {
         // TODO(w41ter) if mem_store exists, we don't need to read pending entries from
         // servers.
 
-        let acked_index = seal(ctx.writer_epoch, &mut ctx.writer_group).await?;
+        let acked_index = seal(ctx.policy, ctx.writer_epoch, &mut ctx.writer_group).await?;
         let mut entries_stream = read_pending_entries(
+            ctx.policy,
             ctx.segment_meta.stream_id,
             ctx.segment_meta.epoch,
             ctx.writer_epoch,
@@ -1257,7 +1240,9 @@ mod recovery {
         let mut buf = vec![];
         let mut next_index = acked_index + 1;
         while let Some(entry) = entries_stream.next().await {
-            let entry = entry?;
+            // NOTICE: Update entry's epoch to writer epoch.
+            let (_, mut entry) = entry?;
+            entry.set_epoch(ctx.writer_epoch);
             buf.push(entry);
             if buf.len() > batch_threshold {
                 // broadcast entries to ...
@@ -1300,185 +1285,37 @@ mod recovery {
             .await;
     }
 
-    // TODO(w41ter) the codes below is duplicated with
-    // `store::segment::CompoundSegmentReader`, and need to abstract and rewrite.
-
     async fn read_pending_entries(
+        policy: ReplicatePolicy,
         stream_id: u64,
         seg_epoch: u32,
         writer_epoch: u32,
         acked_index: u32,
         copy_set: &[String],
     ) -> Result<CompoundSegmentReader> {
+        let next_index = acked_index + 1;
+
         let mut streamings = vec![];
         for addr in copy_set {
             let client = Client::connect(addr).await?;
             let req = storepb::ReadRequest {
                 stream_id,
                 seg_epoch,
-                start_index: acked_index + 1,
+                start_index: next_index,
                 include_pending_entries: false,
                 limit: 0,
             };
             streamings.push(client.read(req).await?);
         }
+
         Ok(CompoundSegmentReader::new(
-            writer_epoch,
-            acked_index,
-            streamings,
+            policy, seg_epoch, next_index, streamings,
         ))
     }
 
-    #[derive(Debug, Clone)]
-    enum ReaderState {
-        None,
-        Polling,
-        Ready { index: u32, entry: Entry },
-        Done,
-    }
-
-    struct Reader {
-        state: ReaderState,
-        entries_stream: Streaming<storepb::ReadResponse>,
-    }
-
-    /// Read and select pending entries, a bridge record will be appended to the
-    /// end of stream.
-    pub(crate) struct CompoundSegmentReader {
-        ready_count: usize,
-        done_count: usize,
-        next_index: u32,
-        epoch: u32,
-        bridge_entry: Option<Entry>,
-        readers: Vec<Reader>,
-    }
-
-    #[allow(dead_code)]
-    impl CompoundSegmentReader {
-        fn new(
-            epoch: u32,
-            acked_index: u32,
-            streams: Vec<Streaming<storepb::ReadResponse>>,
-        ) -> Self {
-            CompoundSegmentReader {
-                ready_count: 0,
-                done_count: 0,
-                next_index: acked_index + 1,
-                epoch,
-                bridge_entry: Some(Entry::Bridge { epoch }),
-                readers: streams
-                    .into_iter()
-                    .map(|stream| Reader {
-                        state: ReaderState::None,
-                        entries_stream: stream,
-                    })
-                    .collect(),
-            }
-        }
-
-        fn step(&mut self, cx: &mut Context<'_>) -> Result<()> {
-            for reader in &mut self.readers {
-                if let ReaderState::None = &reader.state {
-                    let mut try_next = reader.entries_stream.try_next();
-                    match Pin::new(&mut try_next).poll(cx) {
-                        Poll::Pending => {
-                            reader.state = ReaderState::Polling;
-                        }
-                        Poll::Ready(Ok(Some(resp))) => {
-                            self.ready_count += 1;
-                            reader.state = ReaderState::Ready {
-                                index: resp.index,
-                                entry: resp.entry.unwrap().into(),
-                            };
-                        }
-                        Poll::Ready(Ok(None)) => {
-                            self.done_count += 1;
-                            reader.state = ReaderState::Done;
-                        }
-                        Poll::Ready(Err(err)) => {
-                            return Err(err.into());
-                        }
-                    }
-                }
-            }
-            Ok(())
-        }
-
-        fn active_count(&self) -> usize {
-            self.ready_count + self.done_count
-        }
-    }
-
-    impl Stream for CompoundSegmentReader {
-        type Item = Result<Entry>;
-
-        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            let this = self.get_mut();
-            loop {
-                let before_active = this.active_count();
-                match this.step(cx) {
-                    Err(err) => return Poll::Ready(Some(Err(err))),
-                    Ok(()) if this.active_count() == before_active => return Poll::Pending,
-                    _ => {}
-                };
-
-                let policy_threshold = 1;
-
-                // Already done, generate a bridge record.
-                if this.done_count >= policy_threshold {
-                    return Poll::Ready(std::mem::take(&mut this.bridge_entry).map(Ok));
-                }
-
-                if this.ready_count >= policy_threshold {
-                    // Enough count, try advance
-                    // 1. found matched index
-                    let entry = this
-                        .readers
-                        .iter()
-                        .filter_map(|reader| match &reader.state {
-                            ReaderState::Ready { index, entry } if *index == this.next_index => {
-                                Some(entry)
-                            }
-                            _ => None,
-                        })
-                        .fold(Option::<&Entry>::None, |sum, item| match sum {
-                            Some(entry) if entry.epoch() > item.epoch() => sum,
-                            _ => Some(item),
-                        });
-
-                    // skip to next
-                    this.next_index += 1;
-                    match entry {
-                        Some(entry) => {
-                            match entry {
-                                Entry::Hole => panic!("shouldn't receive hole from store"),
-                                Entry::Event { epoch, event } => {
-                                    // TODO(w41ter) take instead of clone.
-                                    return Poll::Ready(Some(Ok(Entry::Event {
-                                        // Update entry's epoch to writer_epoch.
-                                        epoch: this.epoch,
-                                        event: event.clone(),
-                                    })));
-                                }
-                                Entry::Bridge { epoch } => {
-                                    // This mean the latest entry.
-                                    this.done_count = policy_threshold;
-                                    return Poll::Ready(
-                                        std::mem::take(&mut this.bridge_entry).map(Ok),
-                                    );
-                                }
-                            }
-                        }
-                        None => return Poll::Ready(Some(Ok(Entry::Hole))),
-                    }
-                }
-            }
-        }
-    }
-
     struct Seal<T> {
-        count: usize,
-        index: u32,
+        policy: ReplicatePolicy,
+        acked_indexes: Vec<u32>,
         futures: Vec<Option<T>>,
     }
 
@@ -1486,10 +1323,10 @@ mod recovery {
     where
         T: Future<Output = Result<u32>>,
     {
-        fn new(futures: Vec<Option<T>>) -> Self {
+        fn new(policy: ReplicatePolicy, futures: Vec<Option<T>>) -> Self {
             Seal {
-                count: 0,
-                index: 0,
+                policy,
+                acked_indexes: Default::default(),
                 futures,
             }
         }
@@ -1504,6 +1341,7 @@ mod recovery {
         fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             // SAFETY: see `store::segment::SegmentWriter::seal`.
             let this = unsafe { self.get_unchecked_mut() };
+            let num_copies = this.futures.len();
             for req in &mut this.futures {
                 if let Some(future) = req {
                     let pin = unsafe { Pin::new_unchecked(future) };
@@ -1511,12 +1349,14 @@ mod recovery {
                         Poll::Pending => continue,
                         Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                         Poll::Ready(Ok(index)) => {
-                            // TODO(w41ter) compute index by the replication policy.
                             *req = None;
-                            this.count += 1;
-                            this.index = this.index.max(index);
-                            if this.count > 1 {
-                                return Poll::Ready(Ok(this.index));
+
+                            this.acked_indexes.push(index);
+                            if let Some(acked_index) = this
+                                .policy
+                                .actual_acked_index(num_copies, &this.acked_indexes)
+                            {
+                                return Poll::Ready(Ok(acked_index));
                             }
                         }
                     }
@@ -1528,6 +1368,7 @@ mod recovery {
     }
 
     fn seal(
+        policy: ReplicatePolicy,
         epoch: u32,
         writer_group: &mut WriterGroup,
     ) -> Seal<impl Future<Output = Result<u32>> + '_> {
@@ -1535,7 +1376,7 @@ mod recovery {
         for (addr, writer) in &mut writer_group.writers {
             futures.push(Some(writer.seal(epoch)));
         }
-        Seal::new(futures)
+        Seal::new(policy, futures)
     }
 }
 

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod policy;
+pub mod segment;
 pub mod stream;
 mod worker;
 
@@ -27,6 +29,7 @@ use futures::{channel::oneshot, ready, Stream};
 use stream::{StreamReader, StreamWriter};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
+pub(crate) use self::policy::Policy as ReplicatePolicy;
 use self::worker::{Action, Channel, Command, Selector};
 use crate::{
     master::{Master, RemoteMaster},
@@ -152,7 +155,12 @@ impl Journal {
 
     /// Returns a stream reader.
     pub async fn new_stream_reader(&self, stream_name: &str) -> Result<StreamReader> {
-        Ok(StreamReader::new(stream_name, self.master.clone()))
+        // TODO(w41ter) set replicate policy
+        Ok(StreamReader::new(
+            ReplicatePolicy::Simple,
+            stream_name,
+            self.master.clone(),
+        ))
     }
 
     /// Returns a stream writer.

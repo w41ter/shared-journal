@@ -14,15 +14,20 @@
 
 use futures::{channel::oneshot, StreamExt};
 
-use super::worker::{Channel, Command};
+use super::{
+    segment::CompoundSegmentReader,
+    worker::{Channel, Command},
+};
 use crate::{
+    journal::ReplicatePolicy,
     master::{Master, RemoteMaster},
-    seg_store::segment::{build_compound_segment_reader, CompoundSegmentReader},
-    Error, Result, Sequence,
+    seg_store::segment::build_compound_segment_reader,
+    Entry, Error, Result, Sequence,
 };
 
 #[allow(dead_code)]
 pub struct StreamReader {
+    policy: ReplicatePolicy,
     stream_name: String,
     current_epoch: u32,
     start_index: Option<u32>,
@@ -32,8 +37,9 @@ pub struct StreamReader {
 
 #[allow(dead_code)]
 impl StreamReader {
-    pub fn new(stream_name: &str, master: RemoteMaster) -> Self {
+    pub(crate) fn new(policy: ReplicatePolicy, stream_name: &str, master: RemoteMaster) -> Self {
         StreamReader {
+            policy,
             stream_name: stream_name.to_string(),
             current_epoch: 0,
             start_index: None,
@@ -57,6 +63,7 @@ impl StreamReader {
 
         self.segment_reader = Some(
             build_compound_segment_reader(
+                self.policy,
                 segment_meta.stream_id,
                 segment_meta.epoch,
                 segment_meta.copy_set,
@@ -95,8 +102,10 @@ impl StreamReader {
                             continue;
                         }
                     };
-                    let value = (Sequence::new(self.current_epoch, value.0), value.1);
-                    return Ok(Some(value));
+                    if let Entry::Event { event, .. } = value.1 {
+                        let value = (Sequence::new(self.current_epoch, value.0), event);
+                        return Ok(Some(value));
+                    }
                 }
             }
         }
