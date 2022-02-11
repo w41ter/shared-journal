@@ -25,10 +25,6 @@ use tonic::Status;
 
 use crate::{storepb, Entry, Sequence};
 
-fn decode(seq: Sequence) -> (u32, u32) {
-    ((seq >> 32) as u32, (seq & ((1 << 32) - 1)) as u32)
-}
-
 #[derive(Debug)]
 struct Replica {
     bridge: Option<u32>,
@@ -175,7 +171,7 @@ impl Store {
         stream_id: u64,
         seg_epoch: u32,
         writer_epoch: u32,
-        acked_seq: u64,
+        acked_seq: Sequence,
         first_index: u32,
         entries: Vec<Entry>,
     ) -> Result<(), Status> {
@@ -206,10 +202,9 @@ impl Store {
             replica.store(first_index, entries)?;
         }
 
-        let (acked_epoch, acked_index) = decode(acked_seq);
-        if acked_epoch >= seg_epoch {
+        if acked_seq.epoch >= seg_epoch {
             updated = true;
-            replica.advance(acked_index);
+            replica.advance(acked_seq.index);
         }
 
         if updated {

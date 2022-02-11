@@ -57,7 +57,7 @@ impl storepb::segment_store_server::SegmentStore for Server {
             req.stream_id,
             req.seg_epoch,
             req.epoch,
-            req.acked_seq,
+            req.acked_seq.into(),
             req.first_index,
             req.entries.into_iter().map(Into::into).collect(),
         )?;
@@ -143,10 +143,6 @@ mod tests {
     use super::*;
     use crate::{storepb::ReadRequest, Entry, Sequence};
 
-    fn encode(epoch: u32, index: u32) -> Sequence {
-        ((epoch as u64) << 32) | (index as u64)
-    }
-
     fn entry(event: Vec<u8>) -> storepb::Entry {
         storepb::Entry {
             entry_type: storepb::EntryType::Event as i32,
@@ -170,7 +166,7 @@ mod tests {
                 stream_id: 1,
                 seg_epoch: 1,
                 epoch: 1,
-                acked_seq: encode(1, 2),
+                acked_seq: Sequence::new(1, 2).into(),
                 first_index: 3,
                 entries: vec![entry(vec![6u8]), entry(vec![8u8])],
             },
@@ -178,7 +174,7 @@ mod tests {
                 stream_id: 1,
                 seg_epoch: 1,
                 epoch: 1,
-                acked_seq: encode(1, 4),
+                acked_seq: Sequence::new(1, 4).into(),
                 first_index: 5,
                 entries: vec![],
             },
@@ -349,7 +345,7 @@ mod tests {
             stream_id: 1,
             seg_epoch: 1,
             epoch: 1,
-            acked_seq: encode(1, 2),
+            acked_seq: Sequence::new(1, 2).into(),
             first_index: 3,
             entries: vec![entry(vec![6u8]), entry(vec![8u8])],
         };

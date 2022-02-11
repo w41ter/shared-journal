@@ -293,7 +293,7 @@ mod remote {
                 stream_name: observer_meta.stream_name,
                 role: observer_meta.state.role().into(),
                 observer_state: observer_meta.state.into(),
-                acked_seq: observer_meta.acked_seq,
+                acked_seq: observer_meta.acked_seq.into(),
             };
 
             let resp = self.master_client.heartbeat(req).await?;
@@ -518,7 +518,7 @@ pub(crate) mod tests {
             stream_name: "default".to_owned(),
             epoch: 1,
             state: ObserverState::Leading,
-            acked_seq: (1 << 32),
+            acked_seq: Sequence::new(1, 0),
         };
         master.heartbeat(observer_meta).await?;
         Ok(())
@@ -555,7 +555,7 @@ pub(crate) mod tests {
             stream_name: "default".to_owned(),
             epoch: 0,
             state: ObserverState::Leading,
-            acked_seq: (super::mem::DEFAULT_NUM_THRESHOLD + 1) as u64,
+            acked_seq: ((super::mem::DEFAULT_NUM_THRESHOLD + 1) as u64).into(),
         };
         let commands = master.heartbeat(observer_meta).await?;
         assert_eq!(commands.len(), 1);

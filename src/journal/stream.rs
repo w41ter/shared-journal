@@ -18,11 +18,8 @@ use super::worker::{Channel, Command};
 use crate::{
     master::{Master, RemoteMaster},
     seg_store::segment::{build_compound_segment_reader, CompoundSegmentReader},
-    Error, Result,
+    Error, Result, Sequence,
 };
-
-/// An increasing number to order events.
-pub type Sequence = u64;
 
 #[allow(dead_code)]
 pub struct StreamReader {
@@ -76,10 +73,8 @@ impl StreamReader {
 impl StreamReader {
     /// Seeks to the given sequence.
     async fn seek(&mut self, sequence: Sequence) -> Result<()> {
-        let epoch = (sequence >> 32) as u32;
-        let index = sequence as u32;
-        self.current_epoch = epoch;
-        self.start_index = Some(index);
+        self.current_epoch = sequence.epoch;
+        self.start_index = Some(sequence.index);
         self.switch_segment().await?;
         Ok(())
     }
@@ -100,10 +95,7 @@ impl StreamReader {
                             continue;
                         }
                     };
-                    let value = (
-                        ((self.current_epoch as u64) << 32) | (value.0 as u64),
-                        value.1,
-                    );
+                    let value = (Sequence::new(self.current_epoch, value.0), value.1);
                     return Ok(Some(value));
                 }
             }
