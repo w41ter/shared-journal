@@ -31,7 +31,7 @@ use tokio::{runtime::Handle as RuntimeHandle, sync::mpsc::UnboundedSender};
 use super::EpochState;
 use crate::{
     master::{Command as MasterCmd, Master, RemoteMaster},
-    store::segment::{SegmentWriter, WriteRequest},
+    seg_store::segment::{SegmentWriter, WriteRequest},
     Entry, Error, ObserverState, Result, Role, Sequence, INITIAL_EPOCH,
 };
 
@@ -697,7 +697,7 @@ fn flush_messages(
             let cloned_channel = channel.clone();
             runtime.spawn(async move {
                 let epoch = write.epoch;
-                match writer.store(write).await {
+                match writer.write(write).await {
                     Ok(persisted_seq) => {
                         // TODO(w41ter) validate persisted seq.
                         let index = persisted_seq as u32;
@@ -1192,9 +1192,8 @@ mod recovery {
     use super::{Channel, Command, MemStore, WriterGroup};
     use crate::{
         master::{Master, RemoteMaster},
-        serverpb,
-        store::{segment::WriteRequest, Client},
-        Entry, Error, Result, SegmentMeta,
+        seg_store::{segment::WriteRequest, Client},
+        storepb, Entry, Error, Result, SegmentMeta,
     };
 
     pub struct RecoveryContext {
@@ -1292,7 +1291,7 @@ mod recovery {
                 acked: acked_seq,
                 entries: entries.clone(),
             };
-            futures.push(writer.store(write));
+            futures.push(writer.write(write));
         }
         stream::iter(futures)
             .for_each_concurrent(None, |f| async move {
@@ -1315,7 +1314,7 @@ mod recovery {
         let mut streamings = vec![];
         for addr in copy_set {
             let client = Client::connect(addr).await?;
-            let req = serverpb::ReadRequest {
+            let req = storepb::ReadRequest {
                 stream_id,
                 seg_epoch,
                 start_index: acked_index + 1,
@@ -1341,7 +1340,7 @@ mod recovery {
 
     struct Reader {
         state: ReaderState,
-        entries_stream: Streaming<serverpb::ReadResponse>,
+        entries_stream: Streaming<storepb::ReadResponse>,
     }
 
     /// Read and select pending entries, a bridge record will be appended to the
@@ -1360,7 +1359,7 @@ mod recovery {
         fn new(
             epoch: u32,
             acked_index: u32,
-            streams: Vec<Streaming<serverpb::ReadResponse>>,
+            streams: Vec<Streaming<storepb::ReadResponse>>,
         ) -> Self {
             CompoundSegmentReader {
                 ready_count: 0,

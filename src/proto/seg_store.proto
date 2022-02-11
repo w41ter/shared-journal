@@ -14,7 +14,7 @@
 
 syntax = "proto3";
 
-package engula.journal.v1.shared.server;
+package engula.journal.v1.shared.seg_store;
 
 enum EntryType {
     HOLE = 0;
@@ -31,7 +31,7 @@ message Entry {
 service SegmentStore {
     // Store some continuous entries to a segment. This function will create
     // a new segment replica if it not exists.
-    rpc Store(StoreRequest) returns (StoreResponse);
+    rpc Write(WriteRequest) returns (WriteResponse);
 
     // Read some entries from a segment.
     rpc Read(ReadRequest) returns (stream ReadResponse);
@@ -40,7 +40,7 @@ service SegmentStore {
     rpc Seal(SealRequest) returns (SealResponse);
 }
 
-message StoreRequest {
+message WriteRequest {
     uint64 stream_id = 1;
     uint32 seg_epoch = 2;
 
@@ -57,7 +57,7 @@ message StoreRequest {
     repeated Entry entries = 6;
 }
 
-message StoreResponse {
+message WriteResponse {
     uint64 persisted_seq = 1;
 }
 

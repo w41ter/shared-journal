@@ -13,7 +13,7 @@
 // limitations under the License.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tonic_build::compile_protos("src/proto/store.proto")?;
+    tonic_build::compile_protos("src/proto/seg_store.proto")?;
     tonic_build::compile_protos("src/proto/master.proto")?;
     Ok(())
 }

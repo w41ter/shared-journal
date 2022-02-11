@@ -34,17 +34,17 @@ use lazy_static::lazy_static;
 use tonic::Streaming;
 
 use super::Client;
-use crate::{serverpb, Entry, Error, Result, Sequence};
+use crate::{storepb, Entry, Error, Result, Sequence};
 
 #[allow(unused)]
 pub(crate) struct SegmentReader {
     client: Client,
-    entries_stream: Streaming<serverpb::ReadResponse>,
+    entries_stream: Streaming<storepb::ReadResponse>,
 }
 
 #[allow(dead_code)]
 impl SegmentReader {
-    fn new(client: Client, entries_stream: Streaming<serverpb::ReadResponse>) -> Self {
+    fn new(client: Client, entries_stream: Streaming<storepb::ReadResponse>) -> Self {
         SegmentReader {
             client,
             entries_stream,
@@ -137,7 +137,7 @@ impl SegmentReaderBuilder {
 
         let entries_stream = match self.read_policy {
             SegmentReadPolicy::Acked { start, limit } => {
-                let req = serverpb::ReadRequest {
+                let req = storepb::ReadRequest {
                     stream_id: self.stream_id,
                     seg_epoch: self.epoch,
                     start_index: start,
@@ -213,7 +213,7 @@ impl SegmentWriter {
     /// SAFETY: implementation guaranteed to no cross-await-point references.
     pub async fn seal(&mut self, new_epoch: u32) -> Result<u32> {
         let client = self.get_client().await?;
-        let req = serverpb::SealRequest {
+        let req = storepb::SealRequest {
             stream_id: self.stream_id,
             seg_epoch: self.epoch,
             epoch: new_epoch,
@@ -224,7 +224,7 @@ impl SegmentWriter {
     }
 
     /// Store continuously entries with assigned index.
-    pub async fn store(&mut self, write: WriteRequest) -> Result<Sequence> {
+    pub async fn write(&mut self, write: WriteRequest) -> Result<Sequence> {
         if write.index == 0 {
             return Err(Error::InvalidArgument(
                 "index should always greater than zero".to_owned(),
@@ -234,7 +234,7 @@ impl SegmentWriter {
         let client = self.get_client().await?;
 
         let entries = write.entries.into_iter().map(Into::into).collect();
-        let req = serverpb::StoreRequest {
+        let req = storepb::WriteRequest {
             stream_id: self.stream_id,
             seg_epoch: self.epoch,
             acked_seq: write.acked,
@@ -243,7 +243,7 @@ impl SegmentWriter {
             entries,
         };
 
-        let resp = client.store(req).await?;
+        let resp = client.write(req).await?;
 
         Ok(resp.persisted_seq)
     }
@@ -282,7 +282,7 @@ enum ReaderState {
 
 struct Reader {
     state: ReaderState,
-    entries_stream: Streaming<serverpb::ReadResponse>,
+    entries_stream: Streaming<storepb::ReadResponse>,
 }
 
 pub(crate) struct CompoundSegmentReader {
@@ -291,7 +291,7 @@ pub(crate) struct CompoundSegmentReader {
 
 #[allow(dead_code)]
 impl CompoundSegmentReader {
-    fn new(streams: Vec<Streaming<serverpb::ReadResponse>>) -> Self {
+    fn new(streams: Vec<Streaming<storepb::ReadResponse>>) -> Self {
         CompoundSegmentReader {
             readers: streams
                 .into_iter()
@@ -386,7 +386,7 @@ pub(crate) async fn build_compound_segment_reader(
     let mut streamings = vec![];
     for addr in copy_set {
         let client = Client::connect(&addr).await?;
-        let req = serverpb::ReadRequest {
+        let req = storepb::ReadRequest {
             stream_id,
             seg_epoch: epoch,
             start_index: start.unwrap_or(1),

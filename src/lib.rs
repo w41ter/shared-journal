@@ -21,7 +21,7 @@ mod error;
 mod journal;
 mod master;
 mod proto;
-mod store;
+mod seg_store;
 
 pub use self::{
     error::{Error, Result},
@@ -33,7 +33,7 @@ pub use self::{
 };
 use self::{
     master::{ObserverState, StreamMeta},
-    proto::{master as masterpb, server as serverpb},
+    proto::{master as masterpb, seg_store as storepb},
 };
 
 const INITIAL_EPOCH: u32 = 0;

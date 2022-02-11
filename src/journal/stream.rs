@@ -17,7 +17,7 @@ use futures::{channel::oneshot, StreamExt};
 use super::worker::{Channel, Command};
 use crate::{
     master::{Master, RemoteMaster},
-    store::segment::{build_compound_segment_reader, CompoundSegmentReader},
+    seg_store::segment::{build_compound_segment_reader, CompoundSegmentReader},
     Error, Result,
 };
 
