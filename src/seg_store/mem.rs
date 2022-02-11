@@ -23,7 +23,7 @@ use futures::Stream;
 use log::warn;
 use tonic::Status;
 
-use crate::{serverpb, Entry, Sequence};
+use crate::{storepb, Entry, Sequence};
 
 fn decode(seq: Sequence) -> (u32, u32) {
     ((seq >> 32) as u32, (seq & ((1 << 32) - 1)) as u32)
@@ -117,7 +117,7 @@ pub(crate) struct ReplicaReader {
 }
 
 impl Stream for ReplicaReader {
-    type Item = Result<serverpb::ReadResponse, Status>;
+    type Item = Result<storepb::ReadResponse, Status>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -140,7 +140,7 @@ impl Stream for ReplicaReader {
                         this.finished = true;
                     }
 
-                    let resp = serverpb::ReadResponse {
+                    let resp = storepb::ReadResponse {
                         index: *index,
                         entry: Some(entry.clone().into()),
                     };
@@ -170,7 +170,7 @@ impl Store {
         }
     }
 
-    pub fn store(
+    pub fn write(
         &mut self,
         stream_id: u64,
         seg_epoch: u32,

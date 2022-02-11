@@ -264,7 +264,7 @@ mod tests {
     use super::*;
     use crate::{
         master::mem::{MasterConfig, Server as MasterServer},
-        store::Server,
+        seg_store::Server,
     };
 
     type TResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;

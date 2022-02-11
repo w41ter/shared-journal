@@ -14,25 +14,25 @@
 
 use super::{Entry, ObserverState, Role, SegmentState};
 
-pub mod server {
-    tonic::include_proto!("engula.journal.v1.shared.server");
+pub mod seg_store {
+    tonic::include_proto!("engula.journal.v1.shared.seg_store");
 }
 
-impl From<Entry> for server::Entry {
+impl From<Entry> for seg_store::Entry {
     fn from(e: Entry) -> Self {
         match e {
-            Entry::Hole => server::Entry {
-                entry_type: server::EntryType::Hole as i32,
+            Entry::Hole => seg_store::Entry {
+                entry_type: seg_store::EntryType::Hole as i32,
                 epoch: 0,
                 event: vec![],
             },
-            Entry::Event { epoch, event } => server::Entry {
-                entry_type: server::EntryType::Event as i32,
+            Entry::Event { epoch, event } => seg_store::Entry {
+                entry_type: seg_store::EntryType::Event as i32,
                 epoch,
                 event: event.into(),
             },
-            Entry::Bridge { epoch } => server::Entry {
-                entry_type: server::EntryType::Bridge as i32,
+            Entry::Bridge { epoch } => seg_store::Entry {
+                entry_type: seg_store::EntryType::Bridge as i32,
                 epoch,
                 event: vec![],
             },
@@ -40,14 +40,14 @@ impl From<Entry> for server::Entry {
     }
 }
 
-impl From<server::Entry> for Entry {
-    fn from(e: server::Entry) -> Self {
-        match server::EntryType::from_i32(e.entry_type) {
-            Some(server::EntryType::Event) => Entry::Event {
+impl From<seg_store::Entry> for Entry {
+    fn from(e: seg_store::Entry) -> Self {
+        match seg_store::EntryType::from_i32(e.entry_type) {
+            Some(seg_store::EntryType::Event) => Entry::Event {
                 event: e.event.into(),
                 epoch: e.epoch,
             },
-            Some(server::EntryType::Bridge) => Entry::Bridge { epoch: e.epoch },
+            Some(seg_store::EntryType::Bridge) => Entry::Bridge { epoch: e.epoch },
             _ => Entry::Hole,
         }
     }
