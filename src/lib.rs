@@ -93,6 +93,14 @@ impl Entry {
             _ => panic!("Entry::Hole no epoch field"),
         }
     }
+
+    pub fn set_epoch(&mut self, target: u32) {
+        match self {
+            Entry::Event { epoch, event: _ } => *epoch = target,
+            Entry::Bridge { epoch } => *epoch = target,
+            _ => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
