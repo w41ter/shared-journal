@@ -127,8 +127,8 @@ impl StreamInfo {
 
     fn observe(&mut self, observer_id: String, observer_info: ObserverInfo) {
         let acked_seq = observer_info.meta.acked_seq;
-        let acked_epoch = (acked_seq >> 32) as u32;
-        let acked_index = (acked_seq & u32::MAX as u64) as u32;
+        let acked_epoch = acked_seq.epoch;
+        let acked_index = acked_seq.index;
         println!(
             "{:?} acked epoch: {}, acked index {}",
             observer_info, acked_epoch, acked_index
@@ -330,7 +330,7 @@ impl masterpb::master_server::Master for Server {
                 observer_id: req.observer_id,
                 state: req.observer_state.into(),
                 epoch: req.epoch,
-                acked_seq: req.acked_seq,
+                acked_seq: req.acked_seq.into(),
             },
             role: req.role.into(),
             last_heartbeat: Instant::now(),

@@ -166,7 +166,7 @@ pub(crate) struct WriteRequest {
     /// The sequence of acked entries which:
     ///  1. the number of replicas is satisfied replication policy.
     ///  2. all previous entries are acked.
-    pub acked: u64,
+    pub acked: Sequence,
     pub entries: Vec<Entry>,
 }
 
@@ -237,7 +237,7 @@ impl SegmentWriter {
         let req = storepb::WriteRequest {
             stream_id: self.stream_id,
             seg_epoch: self.epoch,
-            acked_seq: write.acked,
+            acked_seq: write.acked.into(),
             first_index: write.index,
             epoch: write.epoch,
             entries,
@@ -245,7 +245,7 @@ impl SegmentWriter {
 
         let resp = client.write(req).await?;
 
-        Ok(resp.persisted_seq)
+        Ok(resp.persisted_seq.into())
     }
 
     async fn get_client(&mut self) -> Result<Client> {

@@ -64,7 +64,7 @@ impl MemStore {
     fn append(&mut self, entry: Entry) -> Sequence {
         let next_index = self.next_index();
         self.entries.push_back(entry);
-        (self.epoch as u64) << 32 | (next_index as u64)
+        Sequence::new(self.epoch, next_index)
     }
 
     /// Range values.
@@ -157,7 +157,7 @@ impl Progress {
 pub(crate) enum MsgDetail {
     /// Store entries to.
     Store {
-        acked_seq: u64,
+        acked_seq: Sequence,
         first_index: u32,
         #[derivative(Debug = "ignore")]
         entries: Vec<Entry>,
@@ -225,7 +225,7 @@ impl ReplicationPolicy {
                     if p.matched_index == 0 {
                         None
                     } else {
-                        Some((epoch as u64) << 32 | (p.matched_index as u64))
+                        Some(Sequence::new(epoch, p.matched_index))
                     }
                 })
                 .max()
@@ -284,7 +284,7 @@ impl StreamStateMachine {
             mem_store: MemStore::new(INITIAL_EPOCH),
             copy_set: HashMap::new(),
             replication_policy: ReplicationPolicy::Simple,
-            acked_seq: 0,
+            acked_seq: Sequence::default(),
             ready: Ready::default(),
             flags: Flags::NONE,
             pending_epochs: Vec::default(),
@@ -406,7 +406,7 @@ impl StreamStateMachine {
         progress: &mut Progress,
         mem_store: &MemStore,
         epoch: u32,
-        acked_seq: u64,
+        acked_seq: Sequence,
         server_id: &str,
         bcast_acked_seq: bool,
     ) {
@@ -415,8 +415,7 @@ impl StreamStateMachine {
         let detail = match mem_store.range(start..end) {
             Some(entries) => {
                 /// Do not forward acked sequence to unmatched index.
-                let matched_acked_seq =
-                    u64::min(acked_seq, (((epoch as u64) << 32) | (end - 1) as u64));
+                let matched_acked_seq = Sequence::min(acked_seq, Sequence::new(epoch, end - 1));
                 MsgDetail::Store {
                     entries,
                     acked_seq: matched_acked_seq,
@@ -700,7 +699,7 @@ fn flush_messages(
                 match writer.write(write).await {
                     Ok(persisted_seq) => {
                         // TODO(w41ter) validate persisted seq.
-                        let index = persisted_seq as u32;
+                        let index = persisted_seq.index;
                         let msg = Message {
                             target,
                             seg_epoch,
@@ -1193,7 +1192,7 @@ mod recovery {
     use crate::{
         master::{Master, RemoteMaster},
         seg_store::{segment::WriteRequest, Client},
-        storepb, Entry, Error, Result, SegmentMeta,
+        storepb, Entry, Error, Result, SegmentMeta, Sequence,
     };
 
     pub struct RecoveryContext {
@@ -1283,7 +1282,7 @@ mod recovery {
     async fn broadcast_entries(ctx: &mut RecoveryContext, next_index: u32, entries: Vec<Entry>) {
         let mut futures = vec![];
         let seg_epoch = ctx.writer_group.epoch();
-        let acked_seq = (seg_epoch as u64) << 32 | (next_index as u64 + entries.len() as u64);
+        let acked_seq = Sequence::new(seg_epoch, next_index + entries.len() as u32);
         for (target, writer) in &mut ctx.writer_group.writers {
             let write = WriteRequest {
                 epoch: ctx.writer_epoch,
@@ -1584,7 +1583,7 @@ mod tests {
                 epoch: 0,
                 event: Box::new([0u8]),
             });
-            assert_eq!(seq, idx + 1);
+            assert_eq!(<Sequence as Into<u64>>::into(seq), idx + 1);
         }
     }
 
