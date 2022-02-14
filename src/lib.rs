@@ -77,7 +77,6 @@ impl std::fmt::Display for Sequence {
 /// compound a stream.
 #[derive(Derivative, Clone, PartialEq, Eq)]
 #[derivative(Debug)]
-#[allow(dead_code)]
 enum Entry {
     /// A placeholder, used in recovery phase.
     Hole,
@@ -125,7 +124,6 @@ impl Default for SegmentState {
 
 /// `SegmentMeta` records the metadata for locating a segment and its data.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct SegmentMeta {
     stream_id: u64,
 

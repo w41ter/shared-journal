@@ -22,7 +22,10 @@ use futures::{Stream, TryStreamExt};
 use tonic::Streaming;
 
 use crate::{
-    journal::policy::{GroupReader, GroupState, ReaderState},
+    journal::{
+        policy::{GroupReader, GroupState, ReaderState},
+        ReplicatePolicy,
+    },
     storepb, Entry, Result,
 };
 
@@ -43,9 +46,6 @@ pub(crate) struct CompoundSegmentReader {
     readers: Vec<Reader>,
 }
 
-use crate::journal::ReplicatePolicy;
-
-#[allow(dead_code)]
 impl CompoundSegmentReader {
     pub fn new(
         policy: ReplicatePolicy,

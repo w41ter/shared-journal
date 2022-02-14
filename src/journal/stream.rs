@@ -27,7 +27,6 @@ use crate::{
     Entry, Error, Result, Sequence,
 };
 
-#[allow(dead_code)]
 pub struct StreamReader {
     policy: ReplicatePolicy,
     stream_name: String,
@@ -37,7 +36,6 @@ pub struct StreamReader {
     master: RemoteMaster,
 }
 
-#[allow(dead_code)]
 impl StreamReader {
     pub(crate) fn new(policy: ReplicatePolicy, stream_name: &str, master: RemoteMaster) -> Self {
         StreamReader {
@@ -78,7 +76,6 @@ impl StreamReader {
     }
 }
 
-#[allow(dead_code, unused)]
 impl StreamReader {
     /// Seeks to the given sequence.
     pub async fn seek(&mut self, sequence: Sequence) -> Result<()> {
@@ -124,7 +121,6 @@ impl StreamWriter {
     }
 }
 
-#[allow(dead_code, unused)]
 impl StreamWriter {
     /// Appends an event, returns the sequence of the event just append.
     pub async fn append(&mut self, event: Vec<u8>) -> Result<Sequence> {
@@ -138,7 +134,8 @@ impl StreamWriter {
     }
 
     /// Truncates events up to a sequence (exclusive).
-    async fn truncate(&mut self, sequence: Sequence) -> Result<()> {
+    #[allow(dead_code)]
+    async fn truncate(&mut self, _sequence: Sequence) -> Result<()> {
         todo!();
     }
 }
