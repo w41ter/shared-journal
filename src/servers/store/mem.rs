@@ -295,7 +295,6 @@ impl Default for Server {
 }
 
 #[async_trait]
-#[allow(unused)]
 impl storepb::segment_store_server::SegmentStore for Server {
     type ReadStream = ReplicaReader;
 

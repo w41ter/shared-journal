@@ -76,12 +76,10 @@ impl From<super::Command> for masterpb::Command {
 type MasterClient = masterpb::master_client::MasterClient<Channel>;
 
 #[derive(Clone)]
-#[allow(unused)]
 pub(super) struct Client {
     client: MasterClient,
 }
 
-#[allow(dead_code)]
 impl Client {
     pub async fn connect(addr: &str) -> crate::Result<Self> {
         let addr = format!("http://{}", addr);
@@ -143,13 +141,11 @@ impl Client {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone)]
 pub struct RemoteMaster {
     master_client: Client,
 }
 
-#[allow(dead_code)]
 impl RemoteMaster {
     pub async fn new(addr: &str) -> Result<Self> {
         Ok(RemoteMaster {
@@ -191,7 +187,6 @@ impl Stream for ListStream {
 }
 
 #[async_trait]
-#[allow(dead_code, unused)]
 impl super::Master for RemoteMaster {
     type ListStream = ListStream;
     type MetaStream = MetaStream;
@@ -245,8 +240,8 @@ impl super::Master for RemoteMaster {
 
     async fn query_segments(
         &self,
-        stream_name: &str,
-        range: std::ops::Range<u64>,
+        _stream_name: &str,
+        _range: std::ops::Range<u64>,
     ) -> Result<Self::MetaStream> {
         todo!()
     }

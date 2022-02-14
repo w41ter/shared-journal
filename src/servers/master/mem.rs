@@ -30,9 +30,9 @@ use crate::{
 };
 
 #[derive(Debug)]
-#[allow(unused)]
 struct PolicyApplicant {
     role: Role,
+    #[allow(dead_code)]
     epoch: u32,
     observer_id: String,
 }
@@ -74,23 +74,23 @@ impl SwitchPolicy {
 }
 
 #[derive(Debug)]
-#[allow(unused)]
 struct ObserverInfo {
     meta: ObserverMeta,
+    #[allow(dead_code)]
     role: Role,
     last_heartbeat: Instant,
 }
 
 #[derive(Debug, Default)]
-#[allow(unused)]
 struct SegmentInfo {
     epoch: u32,
     acked_index: u32,
 }
 
-#[allow(unused)]
 struct StreamInfo {
+    #[allow(dead_code)]
     stream_id: u64,
+    #[allow(dead_code)]
     stream_name: String,
 
     /// The latest allocated epoch of this stream.
@@ -203,7 +203,6 @@ pub struct Server {
     core: Arc<Mutex<MasterCore>>,
 }
 
-#[allow(dead_code)]
 impl Server {
     pub fn new(
         config: MasterConfig,
@@ -231,14 +230,12 @@ impl Server {
         }
     }
 
-    #[allow(dead_code)]
     pub fn into_service(self) -> masterpb::master_server::MasterServer<Server> {
         masterpb::master_server::MasterServer::new(self)
     }
 }
 
 #[async_trait]
-#[allow(unused)]
 impl masterpb::master_server::Master for Server {
     type ListStreamStream =
         stream::Iter<<Vec<Result<masterpb::StreamMeta, Status>> as IntoIterator>::IntoIter>;
@@ -264,7 +261,7 @@ impl masterpb::master_server::Master for Server {
         &self,
         _input: Request<masterpb::ListStreamRequest>,
     ) -> Result<Response<Self::ListStreamStream>, Status> {
-        let mut core = self.core.lock().await;
+        let core = self.core.lock().await;
         Ok(Response::new(stream::iter(
             core.stream_meta
                 .iter()
@@ -331,7 +328,7 @@ impl masterpb::master_server::Master for Server {
         };
 
         let mut core = self.core.lock().await;
-        let mut core = core.deref_mut();
+        let core = core.deref_mut();
         let stream_id = match core.stream_meta.get(&stream_name) {
             Some(id) => *id,
             None => return Err(Status::not_found("no such stream exists")),

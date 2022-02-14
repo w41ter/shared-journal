@@ -49,7 +49,6 @@ pub struct StreamMeta {
 
 /// The role of a stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum Role {
     /// A leader manipulate a stream.
     Leader,
@@ -97,17 +96,16 @@ impl Stream for EpochStateStream {
 
 /// A root structure of shared journal. This journal's streams divide time into
 /// epochs, and each epoch have at most one producer.
-#[allow(unused)]
 pub struct Journal {
     master: RemoteMaster,
     stream_meta: HashMap<String, StreamMeta>,
     observed_streams: HashMap<u64, self::worker::Channel>,
     selector: Selector,
 
+    #[allow(dead_code)]
     worker_handle: (Arc<AtomicBool>, JoinHandle<()>),
 }
 
-#[allow(dead_code, unused)]
 impl Journal {
     /// Return the current epoch state of the specified stream.
     pub async fn current_state(&mut self, stream_name: &str) -> Result<EpochState> {
@@ -181,7 +179,6 @@ impl Journal {
     }
 }
 
-#[allow(dead_code)]
 impl Journal {
     fn new(
         master: RemoteMaster,
@@ -234,7 +231,6 @@ impl Journal {
 }
 
 #[derive(Debug, Clone)]
-#[allow(unused)]
 pub struct JournalOption {
     /// The **unique** ID used to identify this client.
     pub local_id: String,
@@ -247,7 +243,6 @@ pub struct JournalOption {
 }
 
 /// Create and initialize a `Journal`, and start related asynchronous tasks.
-#[allow(unused)]
 pub async fn build_journal(opt: JournalOption) -> Result<Journal> {
     use self::worker::WorkerOption;
 
