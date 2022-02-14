@@ -1400,13 +1400,7 @@ mod recovery {
 
             let epoch = 10;
             let copy_set = vec!["a".to_string(), "b".to_string()];
-            sm.promote(
-                epoch,
-                Role::Leader,
-                "".to_string(),
-                copy_set.clone(),
-                vec![8, 9],
-            );
+            sm.promote(epoch, Role::Leader, "".to_string(), copy_set, vec![8, 9]);
             sm.propose([0u8].into()).unwrap();
             sm.propose([1u8].into()).unwrap();
             sm.propose([2u8].into()).unwrap();
