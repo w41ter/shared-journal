@@ -14,9 +14,7 @@
 
 pub(crate) mod master;
 mod policy;
-pub mod segment;
 pub(crate) mod store;
-pub mod stream;
 mod worker;
 
 use std::{
@@ -28,10 +26,10 @@ use std::{
 };
 
 use futures::{channel::oneshot, ready, Stream};
-use stream::{StreamReader, StreamWriter};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
 pub(crate) use self::policy::Policy as ReplicatePolicy;
+pub use self::store::{StreamReader, StreamWriter};
 use self::{
     master::{remote::RemoteMaster, Master},
     worker::{Action, Channel, Command, Selector},
@@ -213,7 +211,7 @@ impl Journal {
         let stream_meta = self.get_stream_meta(stream_name).await?;
         let stream_id = stream_meta.stream_id;
         let channel = match self.observed_streams.get(&stream_id) {
-            Some(channel) => channel.clone(),
+            Some(channel) => (*channel).clone(),
             None => {
                 let channel = Channel::new(stream_meta.stream_id);
                 let act = Action::Add {

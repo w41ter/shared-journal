@@ -29,10 +29,6 @@ use crate::{
     storepb, Entry, Result,
 };
 
-// TODO(w41ter) the codes below is duplicated with
-// `seg_store::segment::CompoundSegmentReader`, and need to abstract and
-// rewrite.
-
 struct Reader {
     state: ReaderState,
     entries_stream: Streaming<storepb::ReadResponse>,

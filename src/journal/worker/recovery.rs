@@ -24,7 +24,7 @@ use super::{Channel, Command, MemStore, ReplicatePolicy, WriterGroup};
 use crate::{
     journal::{
         master::{remote::RemoteMaster, Master},
-        segment::CompoundSegmentReader,
+        store::CompoundSegmentReader,
         store::{remote::Client, segment::WriteRequest},
     },
     storepb, Entry, Result, SegmentMeta, Sequence,
