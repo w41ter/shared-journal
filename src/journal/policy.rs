@@ -117,10 +117,6 @@ impl GroupReader {
     }
 
     pub(super) fn state(&self) -> GroupState {
-        println!(
-            "in state next index {}, num ready {}, num dome {}",
-            self.next_index, self.num_ready, self.num_done
-        );
         match self.policy {
             GroupPolicy::Simple if self.num_ready >= 1 => GroupState::Active,
             GroupPolicy::Majority
@@ -144,7 +140,6 @@ impl GroupReader {
         reader_state: &mut ReaderState,
         input: Option<(u32, Entry)>,
     ) {
-        println!("num_ready {}, num_done {}", self.num_ready, self.num_done);
         match input {
             Some((index, entry)) if index >= self.next_index => {
                 self.num_ready += 1;
@@ -171,7 +166,6 @@ impl GroupReader {
             if let ReaderState::Ready { index, entry } = state {
                 if *index == self.next_index {
                     self.num_ready -= 1;
-                    println!("consume one ready, now ready is {}", self.num_ready);
 
                     if !fresh_entry
                         .as_ref()
@@ -181,11 +175,6 @@ impl GroupReader {
                         fresh_entry = Some(std::mem::replace(entry, Entry::Hole));
                     }
                     *state = ReaderState::Polling;
-                } else {
-                    println!(
-                        "ignore entry with index {}, expect {}",
-                        *index, self.next_index
-                    );
                 }
             }
         }

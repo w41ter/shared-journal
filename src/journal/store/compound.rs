@@ -281,7 +281,6 @@ mod tests {
             },
         ];
         for case in cases {
-            println!("run test {}", case.desc);
             let group_reader =
                 GroupReader::new(GroupPolicy::Simple, case.next_index, case.streams.len());
             let mut comp_reader = RawCompoundSegmentReader::new_with_reader(
@@ -423,7 +422,6 @@ mod tests {
             },
         ];
         for case in cases {
-            println!("run test {}", case.desc);
             let group_reader =
                 GroupReader::new(GroupPolicy::Majority, case.next_index, case.streams.len());
             let mut comp_reader = RawCompoundSegmentReader::new_with_reader(
