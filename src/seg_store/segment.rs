@@ -36,23 +36,18 @@ use crate::{
     storepb, Entry, Error, Result, Sequence,
 };
 
-#[allow(unused)]
 pub(crate) struct SegmentReader {
-    client: Client,
     entries_stream: Streaming<storepb::ReadResponse>,
 }
 
-#[allow(dead_code)]
 impl SegmentReader {
-    fn new(client: Client, entries_stream: Streaming<storepb::ReadResponse>) -> Self {
-        SegmentReader {
-            client,
-            entries_stream,
-        }
+    #[allow(dead_code)]
+    fn new(entries_stream: Streaming<storepb::ReadResponse>) -> Self {
+        SegmentReader { entries_stream }
     }
 }
 
-#[allow(unused)]
+#[allow(dead_code)]
 impl SegmentReader {
     /// Returns the next entry.
     pub async fn try_next(&mut self) -> Result<Option<Entry>> {
@@ -73,89 +68,6 @@ impl SegmentReader {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum SegmentReadPolicy {
-    Acked { start: u32, limit: u32 },
-    Pending,
-}
-
-enum SegmentClientOpt {
-    None,
-    Address(String),
-    Client(Client),
-}
-
-pub(crate) struct SegmentReaderBuilder {
-    stream_id: u64,
-    epoch: u32,
-
-    client: SegmentClientOpt,
-    read_policy: SegmentReadPolicy,
-}
-
-#[allow(dead_code)]
-impl SegmentReaderBuilder {
-    pub fn new(stream_id: u64, epoch: u32) -> Self {
-        SegmentReaderBuilder {
-            stream_id,
-            epoch,
-            client: SegmentClientOpt::None,
-            read_policy: SegmentReadPolicy::Pending,
-        }
-    }
-
-    /// Set remote address.
-    pub fn bind(mut self, addr: &str) -> Self {
-        self.client = SegmentClientOpt::Address(addr.to_owned());
-        self
-    }
-
-    /// Set segment client address.
-    pub fn set_client(mut self, client: Client) -> Self {
-        self.client = SegmentClientOpt::Client(client);
-        self
-    }
-
-    /// Seeks to the given index in this segment.
-    pub fn read_acked_entries(mut self, start: u32, limit: u32) -> Self {
-        self.read_policy = SegmentReadPolicy::Acked { start, limit };
-        self
-    }
-
-    /// Seeks to the first pending entry.
-    pub fn read_pending_entires(mut self) -> Self {
-        self.read_policy = SegmentReadPolicy::Pending;
-        self
-    }
-
-    pub async fn build(self) -> Result<SegmentReader> {
-        let client = match self.client {
-            SegmentClientOpt::None => panic!("Please setup the client address"),
-            SegmentClientOpt::Address(addr) => Client::connect(&addr).await?,
-            SegmentClientOpt::Client(client) => client,
-        };
-
-        let entries_stream = match self.read_policy {
-            SegmentReadPolicy::Acked { start, limit } => {
-                let req = storepb::ReadRequest {
-                    stream_id: self.stream_id,
-                    seg_epoch: self.epoch,
-                    start_index: start,
-                    limit,
-                    include_pending_entries: false,
-                };
-                client.read(req).await?
-            }
-            SegmentReadPolicy::Pending => {
-                unimplemented!();
-            }
-        };
-
-        Ok(SegmentReader::new(client, entries_stream))
-    }
-}
-
-#[allow(dead_code)]
 pub(crate) struct WriteRequest {
     /// The epoch of write request initiator, it's not always equal to segment's
     /// epoch.
@@ -193,7 +105,6 @@ pub(crate) struct SegmentWriter {
     client: Option<Client>,
 }
 
-#[allow(dead_code)]
 impl SegmentWriter {
     pub fn new(stream_id: u64, epoch: u32, replica: String) -> Self {
         SegmentWriter {
@@ -205,7 +116,6 @@ impl SegmentWriter {
     }
 }
 
-#[allow(dead_code, unused)]
 impl SegmentWriter {
     /// Seal the `store` operations of current segment, and any write operations
     /// issued with a small epoch will be rejected.
@@ -272,7 +182,6 @@ impl SegmentWriter {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) async fn build_compound_segment_reader(
     policy: ReplicatePolicy,
     stream_id: u64,

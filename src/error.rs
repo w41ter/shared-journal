@@ -34,6 +34,7 @@ pub enum Error {
     Unknown(Box<dyn std::error::Error + Send>),
 }
 
+#[must_use = "this `Result` may be an `Err` variant, which should be handled"]
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl From<oneshot::Canceled> for Error {

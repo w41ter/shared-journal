@@ -23,6 +23,9 @@ mod master;
 mod proto;
 mod seg_store;
 
+pub use master::mem::{MasterConfig, Server as MasterServer};
+pub use seg_store::Server as StoreServer;
+
 pub use self::{
     error::{Error, Result},
     journal::{
@@ -64,6 +67,12 @@ impl From<u64> for Sequence {
 impl From<Sequence> for u64 {
     fn from(seq: Sequence) -> Self {
         (seq.epoch as u64) << 32 | (seq.index as u64)
+    }
+}
+
+impl std::fmt::Display for Sequence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", <Sequence as Into<u64>>::into(*self))
     }
 }
 
@@ -161,16 +170,4 @@ struct ReplicaMeta {
 #[ctor::ctor]
 fn init() {
     pretty_env_logger::init();
-}
-
-#[cfg(test)]
-mod tests {
-    use log::{error, info, warn};
-
-    #[test]
-    fn log() {
-        info!("such information");
-        warn!("o_O");
-        error!("much error");
-    }
 }
