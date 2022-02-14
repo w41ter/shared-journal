@@ -31,10 +31,7 @@ use lazy_static::lazy_static;
 use tonic::Streaming;
 
 use super::remote::Client;
-use crate::{
-    journal::{segment::CompoundSegmentReader, ReplicatePolicy},
-    storepb, Entry, Error, Result, Sequence,
-};
+use crate::{storepb, Entry, Error, Result, Sequence};
 
 pub(crate) struct SegmentReader {
     entries_stream: Streaming<storepb::ReadResponse>,
@@ -180,33 +177,4 @@ impl SegmentWriter {
 
         Ok(self.client.as_ref().cloned().unwrap())
     }
-}
-
-pub(crate) async fn build_compound_segment_reader(
-    policy: ReplicatePolicy,
-    stream_id: u64,
-    epoch: u32,
-    copy_set: Vec<String>,
-    start: Option<u32>,
-) -> Result<CompoundSegmentReader> {
-    // FIXME(w41ter) more efficient implementation.
-    let mut streamings = vec![];
-    for addr in copy_set {
-        let client = Client::connect(&addr).await?;
-        let req = storepb::ReadRequest {
-            stream_id,
-            seg_epoch: epoch,
-            start_index: start.unwrap_or(1),
-            include_pending_entries: false,
-            limit: 0,
-        };
-        streamings.push(client.read(req).await?);
-    }
-
-    Ok(CompoundSegmentReader::new(
-        policy,
-        epoch,
-        start.unwrap_or(1),
-        streamings,
-    ))
 }

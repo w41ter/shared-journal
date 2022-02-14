@@ -14,14 +14,11 @@
 
 use futures::{channel::oneshot, StreamExt};
 
-use super::{
-    segment::CompoundSegmentReader,
-    worker::{Channel, Command},
-};
+use super::{build_compound_segment_reader, CompoundSegmentReader};
 use crate::{
     journal::{
         master::{remote::RemoteMaster, Master},
-        store::segment::build_compound_segment_reader,
+        worker::{Channel, Command},
         ReplicatePolicy,
     },
     Entry, Error, Result, Sequence,

@@ -25,11 +25,7 @@ pub mod servers;
 
 pub use self::{
     error::{Error, Result},
-    journal::{
-        build_journal,
-        stream::{StreamReader, StreamWriter},
-        Journal, JournalOption, Role,
-    },
+    journal::{build_journal, Journal, JournalOption, Role, StreamReader, StreamWriter},
 };
 use self::{
     journal::master::ObserverState,
