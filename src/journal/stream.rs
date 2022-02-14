@@ -79,7 +79,7 @@ impl StreamReader {
 #[allow(dead_code, unused)]
 impl StreamReader {
     /// Seeks to the given sequence.
-    async fn seek(&mut self, sequence: Sequence) -> Result<()> {
+    pub async fn seek(&mut self, sequence: Sequence) -> Result<()> {
         self.current_epoch = sequence.epoch;
         self.start_index = Some(sequence.index);
         self.switch_segment().await?;
@@ -87,7 +87,7 @@ impl StreamReader {
     }
 
     /// Returns the next event or waits until it is available.
-    async fn wait_next(&mut self) -> Result<Option<(Sequence, Box<[u8]>)>> {
+    pub async fn wait_next(&mut self) -> Result<Option<(Sequence, Box<[u8]>)>> {
         loop {
             match &mut self.segment_reader {
                 None => {

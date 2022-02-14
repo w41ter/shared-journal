@@ -24,11 +24,10 @@ use tonic::{transport::Channel, Request, Response, Status, Streaming};
 use crate::storepb;
 
 #[derive(Debug)]
-pub(crate) struct Server {
+pub struct Server {
     store: Arc<Mutex<mem::Store>>,
 }
 
-#[allow(dead_code)]
 impl Server {
     pub fn new() -> Self {
         Server {
@@ -38,6 +37,12 @@ impl Server {
 
     pub fn into_service(self) -> storepb::segment_store_server::SegmentStoreServer<Server> {
         storepb::segment_store_server::SegmentStoreServer::new(self)
+    }
+}
+
+impl Default for Server {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -95,12 +100,10 @@ impl storepb::segment_store_server::SegmentStore for Server {
 type SegmentStoreClient = storepb::segment_store_client::SegmentStoreClient<Channel>;
 
 #[derive(Clone)]
-#[allow(unused)]
 pub struct Client {
     client: SegmentStoreClient,
 }
 
-#[allow(dead_code)]
 impl Client {
     pub async fn connect(addr: &str) -> crate::Result<Client> {
         let addr = format!("http://{}", addr);

@@ -226,13 +226,13 @@ impl Journal {
 #[allow(unused)]
 pub struct JournalOption {
     /// The **unique** ID used to identify this client.
-    local_id: String,
+    pub local_id: String,
 
     /// The address descriptor of the master.
-    master_url: String,
+    pub master_url: String,
 
     /// Heartbeat intervals in milliseconds.
-    heartbeat_interval: u64,
+    pub heartbeat_interval: u64,
 }
 
 /// Create and initialize a `Journal`, and start related asynchronous tasks.

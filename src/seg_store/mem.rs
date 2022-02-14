@@ -104,7 +104,7 @@ impl PartialStream {
 }
 
 #[derive(Debug)]
-pub(crate) struct ReplicaReader {
+pub struct ReplicaReader {
     next_index: u32,
     limit: usize,
     finished: bool,
@@ -153,12 +153,10 @@ impl Stream for ReplicaReader {
 }
 
 #[derive(Debug)]
-#[allow(unused)]
 pub(super) struct Store {
     streams: HashMap<u64, Box<PartialStream>>,
 }
 
-#[allow(dead_code)]
 impl Store {
     pub fn new() -> Self {
         Store {

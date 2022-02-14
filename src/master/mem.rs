@@ -205,7 +205,7 @@ struct MasterCore {
     replicas: Vec<String>,
 }
 
-pub(crate) struct Server {
+pub struct Server {
     core: Arc<Mutex<MasterCore>>,
 }
 
