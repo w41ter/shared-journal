@@ -25,7 +25,7 @@ use std::{
 
 use bitflags::bitflags;
 use futures::channel::oneshot;
-use log::warn;
+use log::{info, warn};
 use tokio::{runtime::Handle as RuntimeHandle, sync::mpsc::UnboundedSender};
 
 use super::{EpochState, ReplicatePolicy};
@@ -96,6 +96,8 @@ impl MemStore {
 /// For now, let's assume that message passing is reliable.
 #[allow(unused)]
 pub(in crate::journal) struct Progress {
+    epoch: u32,
+
     // The default value is zero, so any proposal's index should greater than zero.
     pub matched_index: u32,
     next_index: u32,
@@ -109,8 +111,9 @@ pub(in crate::journal) struct Progress {
 impl Progress {
     const WINDOW: usize = 128;
 
-    fn new() -> Self {
+    fn new(epoch: u32) -> Self {
         Progress {
+            epoch,
             matched_index: 0,
             next_index: 1,
             start: 0,
@@ -147,14 +150,19 @@ impl Progress {
 
     /// A server has stored entries.
     fn on_received(&mut self, epoch: u32, index: u32) -> bool {
-        // TODO(w41ter) check epoch
-        while self.size > 0 && self.in_flights[self.start] < index {
-            self.start = (self.start + 1) % Self::WINDOW;
-            self.size -= 1;
+        if self.epoch != epoch {
+            // Staled received request.
+            false
+        } else {
+            // TODO(w41ter) check epoch
+            while self.size > 0 && self.in_flights[self.start] < index {
+                self.start = (self.start + 1) % Self::WINDOW;
+                self.size -= 1;
+            }
+            self.matched_index = index;
+            self.next_index = index + 1;
+            self.size < Self::WINDOW
         }
-        self.matched_index = index;
-        self.next_index = index + 1;
-        self.size < Self::WINDOW
     }
 }
 
@@ -300,7 +308,7 @@ impl StreamStateMachine {
         self.mem_store = MemStore::new(epoch);
         self.copy_set = copy_set
             .into_iter()
-            .map(|remote| (remote, Progress::new()))
+            .map(|remote| (remote, Progress::new(self.epoch)))
             .collect();
         self.pending_epochs = pending_epochs;
 
@@ -353,6 +361,7 @@ impl StreamStateMachine {
 
     fn advance(&mut self) {
         debug_assert_eq!(self.role, Role::Leader);
+
         /// Don't ack any entries if there exists a pending segment.
         if !self.pending_epochs.is_empty() {
             return;
@@ -369,6 +378,12 @@ impl StreamStateMachine {
 
     fn broadcast(&mut self) {
         debug_assert_eq!(self.role, Role::Leader);
+
+        /// Do not replicate entries if there exists two pending segments.
+        if self.pending_epochs.len() == 2 {
+            return;
+        }
+
         self.copy_set.iter_mut().for_each(|(server_id, progress)| {
             Self::replicate(
                 &mut self.ready,
@@ -454,6 +469,11 @@ impl StreamStateMachine {
             );
             return;
         }
+
+        info!(
+            "stream {} epoch {} receive recovered msg, seg epoch: {}, writer epoch: {}",
+            self.stream_id, self.epoch, seg_epoch, writer_epoch
+        );
 
         match self.pending_epochs.pop() {
             Some(first_pending_epoch) if first_pending_epoch == seg_epoch => {
@@ -1400,7 +1420,7 @@ mod recovery {
 
             let epoch = 10;
             let copy_set = vec!["a".to_string(), "b".to_string()];
-            sm.promote(epoch, Role::Leader, "".to_string(), copy_set, vec![8, 9]);
+            sm.promote(epoch, Role::Leader, "".to_string(), copy_set, vec![9]);
             sm.propose([0u8].into()).unwrap();
             sm.propose([1u8].into()).unwrap();
             sm.propose([2u8].into()).unwrap();
@@ -1428,11 +1448,63 @@ mod recovery {
             assert!(ready.is_some());
             assert!(ready.as_ref().unwrap().acked_seq <= Sequence::new(10, 0));
 
+            // All segment are recovered.
+            sm.handle_recovered(9, epoch);
+            let ready = sm.collect();
+            assert!(ready.is_some());
+            assert!(ready.as_ref().unwrap().acked_seq >= Sequence::new(10, 3));
+        }
+
+        #[test]
+        fn blocking_replication_if_exists_two_pending_segments() {
+            let mut sm = StreamStateMachine::new("default".to_string(), 1);
+
+            let epoch = 10;
+            let copy_set = vec!["a".to_string(), "b".to_string()];
+            sm.promote(epoch, Role::Leader, "".to_string(), copy_set, vec![8, 9]);
+            sm.propose([0u8].into()).unwrap();
+            sm.propose([1u8].into()).unwrap();
+            sm.propose([2u8].into()).unwrap();
+
+            let ready = sm.collect();
+            assert!(ready.is_some());
+            assert!(ready.as_ref().unwrap().acked_seq <= Sequence::new(10, 0));
+
+            for msg in &ready.as_ref().unwrap().pending_messages {
+                if let MsgDetail::Store {
+                    acked_seq,
+                    first_index,
+                    entries,
+                } = &msg.detail
+                {
+                    panic!("Do not replicate entries if there exists two pending segments");
+                }
+            }
+
+            // All entries are replicated.
+            let ready = sm.collect();
+            assert!(ready.is_some());
+            assert!(ready.as_ref().unwrap().acked_seq <= Sequence::new(10, 0));
+
             // A segment is recovered.
             sm.handle_recovered(8, epoch);
             let ready = sm.collect();
             assert!(ready.is_some());
             assert!(ready.as_ref().unwrap().acked_seq <= Sequence::new(10, 0));
+
+            for msg in &ready.as_ref().unwrap().pending_messages {
+                if let MsgDetail::Store {
+                    acked_seq,
+                    first_index,
+                    entries,
+                } = &msg.detail
+                {
+                    if !entries.is_empty() {
+                        let index = first_index + entries.len() as u32 - 1;
+                        sm.handle_received(msg.target.clone(), msg.epoch, index);
+                    }
+                }
+            }
 
             // All segment are recovered.
             sm.handle_recovered(9, epoch);
