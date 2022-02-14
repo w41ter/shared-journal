@@ -51,7 +51,7 @@ impl Policy {
     }
 
     pub(super) fn new_group_reader(self, next_index: u32, num_copies: usize) -> GroupReader {
-        GroupReader::new(self, next_index, num_copies)
+        GroupReader::new(self.into(), next_index, num_copies)
     }
 }
 
@@ -62,6 +62,30 @@ pub(super) enum ReaderState {
     Done,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum GroupPolicy {
+    /// A simple strategy that accept entries as long as one copy holds the
+    /// dataset.
+    ///
+    /// This strategy is mainly used for testing.
+    Simple,
+
+    /// A strategy that accept a majority set of entries are ready.
+    ///
+    /// This strategy is mainly used for testing.
+    #[allow(unused)]
+    Majority,
+}
+
+impl From<Policy> for GroupPolicy {
+    fn from(policy: Policy) -> Self {
+        match policy {
+            Policy::Simple => GroupPolicy::Simple,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub(super) enum GroupState {
     Pending,
     Active,
@@ -74,11 +98,11 @@ pub(super) struct GroupReader {
     num_done: usize,
     num_copies: usize,
     next_index: u32,
-    policy: Policy,
+    policy: GroupPolicy,
 }
 
 impl GroupReader {
-    fn new(policy: Policy, next_index: u32, num_copies: usize) -> Self {
+    pub(super) fn new(policy: GroupPolicy, next_index: u32, num_copies: usize) -> Self {
         GroupReader {
             num_ready: 0,
             num_done: 0,
@@ -88,17 +112,25 @@ impl GroupReader {
         }
     }
 
+    fn majority(&self) -> usize {
+        (self.num_copies / 2) + 1
+    }
+
     pub(super) fn state(&self) -> GroupState {
+        println!(
+            "in state next index {}, num ready {}, num dome {}",
+            self.next_index, self.num_ready, self.num_done
+        );
         match self.policy {
-            Policy::Simple => {
-                if self.num_ready > 1 {
-                    GroupState::Active
-                } else if self.num_done == self.num_copies {
-                    GroupState::Done
-                } else {
-                    GroupState::Pending
-                }
+            GroupPolicy::Simple if self.num_ready >= 1 => GroupState::Active,
+            GroupPolicy::Majority
+                if self.num_ready > 0 && self.num_ready + self.num_done >= self.majority() =>
+            {
+                GroupState::Active
             }
+            GroupPolicy::Majority if self.num_done >= self.majority() => GroupState::Done,
+            _ if self.num_done == self.num_copies => GroupState::Done,
+            _ => GroupState::Pending,
         }
     }
 
@@ -112,10 +144,14 @@ impl GroupReader {
         reader_state: &mut ReaderState,
         input: Option<(u32, Entry)>,
     ) {
+        println!("num_ready {}, num_done {}", self.num_ready, self.num_done);
         match input {
-            Some((index, entry)) => {
+            Some((index, entry)) if index >= self.next_index => {
                 self.num_ready += 1;
                 *reader_state = ReaderState::Ready { index, entry };
+            }
+            Some(_) => {
+                // Ignore staled entries.
             }
             None => {
                 self.num_done += 1;
@@ -129,12 +165,13 @@ impl GroupReader {
     where
         I: IntoIterator<Item = &'a mut ReaderState>,
     {
-        // 1. found matched index
+        // Found matched index
         let mut fresh_entry: Option<Entry> = None;
         for state in i.into_iter() {
             if let ReaderState::Ready { index, entry } = state {
                 if *index == self.next_index {
                     self.num_ready -= 1;
+                    println!("consume one ready, now ready is {}", self.num_ready);
 
                     if !fresh_entry
                         .as_ref()
@@ -144,6 +181,11 @@ impl GroupReader {
                         fresh_entry = Some(std::mem::replace(entry, Entry::Hole));
                     }
                     *state = ReaderState::Polling;
+                } else {
+                    println!(
+                        "ignore entry with index {}, expect {}",
+                        *index, self.next_index
+                    );
                 }
             }
         }
