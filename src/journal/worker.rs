@@ -132,7 +132,12 @@ impl Progress {
 
     fn replicate(&mut self, next_index: u32) {
         debug_assert!(self.size < Self::WINDOW);
-        debug_assert!(self.next_index <= next_index);
+        debug_assert!(
+            self.next_index <= next_index,
+            "local next_index {}, but receive {}",
+            self.next_index,
+            next_index
+        );
         self.next_index = next_index;
 
         let off = (self.start + self.size) % Self::WINDOW;
@@ -392,6 +397,7 @@ impl StreamStateMachine {
             Some(entries) => {
                 /// Do not forward acked sequence to unmatched index.
                 let matched_acked_seq = Sequence::min(acked_seq, Sequence::new(epoch, end - 1));
+                progress.replicate(end);
                 MsgDetail::Store {
                     entries,
                     acked_seq: matched_acked_seq,
@@ -410,7 +416,6 @@ impl StreamStateMachine {
             None => return,
         };
 
-        progress.replicate(end);
         let msg = Message {
             target: server_id.to_owned(),
             seg_epoch: epoch,
@@ -1169,7 +1174,7 @@ mod recovery {
     use crate::{
         journal::{
             master::{remote::RemoteMaster, Master},
-            policy::{GroupReadPolicy, GroupState, ReaderState},
+            policy::{GroupReader, GroupState, ReaderState},
             segment::CompoundSegmentReader,
             store::{remote::Client, segment::WriteRequest},
         },
@@ -1379,6 +1384,68 @@ mod recovery {
             futures.push(Some(writer.seal(epoch)));
         }
         Seal::new(policy, futures)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::{
+            journal::worker::{MsgDetail, StreamStateMachine},
+            Role,
+        };
+
+        #[test]
+        fn blocking_advance_until_all_previous_are_acked() {
+            let mut sm = StreamStateMachine::new("default".to_string(), 1);
+
+            let epoch = 10;
+            let copy_set = vec!["a".to_string(), "b".to_string()];
+            sm.promote(
+                epoch,
+                Role::Leader,
+                "".to_string(),
+                copy_set.clone(),
+                vec![8, 9],
+            );
+            sm.propose([0u8].into()).unwrap();
+            sm.propose([1u8].into()).unwrap();
+            sm.propose([2u8].into()).unwrap();
+
+            let ready = sm.collect();
+            assert!(ready.is_some());
+            assert!(ready.as_ref().unwrap().acked_seq <= Sequence::new(10, 0));
+
+            for msg in &ready.as_ref().unwrap().pending_messages {
+                if let MsgDetail::Store {
+                    acked_seq,
+                    first_index,
+                    entries,
+                } = &msg.detail
+                {
+                    if !entries.is_empty() {
+                        let index = first_index + entries.len() as u32 - 1;
+                        sm.handle_received(msg.target.clone(), msg.epoch, index);
+                    }
+                }
+            }
+
+            // All entries are replicated.
+            let ready = sm.collect();
+            assert!(ready.is_some());
+            assert!(ready.as_ref().unwrap().acked_seq <= Sequence::new(10, 0));
+
+            // A segment is recovered.
+            sm.handle_recovered(8, epoch);
+            let ready = sm.collect();
+            assert!(ready.is_some());
+            assert!(ready.as_ref().unwrap().acked_seq <= Sequence::new(10, 0));
+
+            // All segment are recovered.
+            sm.handle_recovered(9, epoch);
+            let ready = sm.collect();
+            assert!(ready.is_some());
+            assert!(ready.as_ref().unwrap().acked_seq >= Sequence::new(10, 3));
+        }
     }
 }
 
