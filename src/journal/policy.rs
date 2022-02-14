@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use super::worker::Progress;
-use crate::Sequence;
+use crate::{Entry, Sequence};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Policy {
@@ -50,12 +50,10 @@ impl Policy {
         }
     }
 
-    pub(super) fn group_read_policy(self, next_index: u32, num_copies: usize) -> GroupReadPolicy {
-        GroupReadPolicy::new(self, next_index, num_copies)
+    pub(super) fn new_group_reader(self, next_index: u32, num_copies: usize) -> GroupReader {
+        GroupReader::new(self, next_index, num_copies)
     }
 }
-
-use crate::Entry;
 
 #[derive(Debug, Clone)]
 pub(super) enum ReaderState {
@@ -71,7 +69,7 @@ pub(super) enum GroupState {
 }
 
 #[derive(Debug)]
-pub(super) struct GroupReadPolicy {
+pub(super) struct GroupReader {
     num_ready: usize,
     num_done: usize,
     num_copies: usize,
@@ -79,9 +77,9 @@ pub(super) struct GroupReadPolicy {
     policy: Policy,
 }
 
-impl GroupReadPolicy {
+impl GroupReader {
     fn new(policy: Policy, next_index: u32, num_copies: usize) -> Self {
-        GroupReadPolicy {
+        GroupReader {
             num_ready: 0,
             num_done: 0,
             num_copies,

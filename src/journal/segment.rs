@@ -22,7 +22,7 @@ use futures::{Stream, TryStreamExt};
 use tonic::Streaming;
 
 use crate::{
-    journal::policy::{GroupReadPolicy, GroupState, ReaderState},
+    journal::policy::{GroupReader, GroupState, ReaderState},
     storepb, Entry, Result,
 };
 
@@ -38,7 +38,7 @@ struct Reader {
 /// Read and select pending entries, a bridge record will be appended to the
 /// end of stream.
 pub(crate) struct CompoundSegmentReader {
-    policy: GroupReadPolicy,
+    policy: GroupReader,
     bridge_entry: Option<Entry>,
     readers: Vec<Reader>,
 }
@@ -53,7 +53,7 @@ impl CompoundSegmentReader {
         next_index: u32,
         streams: Vec<Streaming<storepb::ReadResponse>>,
     ) -> Self {
-        let group_policy = policy.group_read_policy(next_index, streams.len());
+        let group_policy = policy.new_group_reader(next_index, streams.len());
         CompoundSegmentReader {
             bridge_entry: Some(Entry::Bridge { epoch: seg_epoch }),
             policy: group_policy,
