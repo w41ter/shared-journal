@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{Entry, ObserverState, Role, SegmentState};
+use crate::{Entry, ObserverState, Role, SegmentState};
 
 pub mod seg_store {
     tonic::include_proto!("engula.journal.v1.shared.seg_store");

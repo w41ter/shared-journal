@@ -19,9 +19,11 @@ use super::{
     worker::{Channel, Command},
 };
 use crate::{
-    journal::ReplicatePolicy,
-    master::{Master, RemoteMaster},
-    seg_store::segment::build_compound_segment_reader,
+    journal::{
+        master::{remote::RemoteMaster, Master},
+        store::segment::build_compound_segment_reader,
+        ReplicatePolicy,
+    },
     Entry, Error, Result, Sequence,
 };
 

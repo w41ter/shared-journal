@@ -22,10 +22,12 @@ use std::{
 use async_trait::async_trait;
 use futures::stream;
 use tokio::sync::Mutex;
-use tonic::{transport::Channel, Request, Response, Status, Streaming};
+use tonic::{Request, Response, Status};
 
-use super::ObserverMeta;
-use crate::{masterpb, Role, SegmentState, INITIAL_EPOCH};
+use crate::{
+    journal::master::{Command, ObserverMeta},
+    masterpb, Role, SegmentState, INITIAL_EPOCH,
+};
 
 #[derive(Debug)]
 #[allow(unused)]
@@ -35,7 +37,7 @@ struct PolicyApplicant {
     observer_id: String,
 }
 
-pub(super) const DEFAULT_NUM_THRESHOLD: u32 = 1024;
+pub(crate) const DEFAULT_NUM_THRESHOLD: u32 = 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ThresholdSwitching {}
@@ -46,11 +48,7 @@ impl ThresholdSwitching {
         ThresholdSwitching {}
     }
 
-    fn apply(
-        &self,
-        applicant: &PolicyApplicant,
-        stream_info: &mut StreamInfo,
-    ) -> Option<super::Command> {
+    fn apply(&self, applicant: &PolicyApplicant, stream_info: &mut StreamInfo) -> Option<Command> {
         if let Role::Leader = applicant.role {
             if let Some(segment_info) = stream_info.segments.get(&stream_info.epoch) {
                 if segment_info.acked_index > DEFAULT_NUM_THRESHOLD {
@@ -68,11 +66,7 @@ enum SwitchPolicy {
 }
 
 impl SwitchPolicy {
-    fn apply(
-        &self,
-        applicant: &PolicyApplicant,
-        stream_info: &mut StreamInfo,
-    ) -> Option<super::Command> {
+    fn apply(&self, applicant: &PolicyApplicant, stream_info: &mut StreamInfo) -> Option<Command> {
         match self {
             SwitchPolicy::Threshold(policy) => policy.apply(applicant, stream_info),
         }
@@ -142,11 +136,11 @@ impl StreamInfo {
         segment_info.acked_index = acked_index;
     }
 
-    fn reset_leader(&mut self, applicant: &PolicyApplicant) -> super::Command {
+    fn reset_leader(&mut self, applicant: &PolicyApplicant) -> Command {
         self.epoch += 1;
         self.leader = Some(applicant.observer_id.clone());
         // TODO(w41ter) set pending epochs.
-        super::Command::Promote {
+        Command::Promote {
             role: Role::Leader,
             epoch: self.epoch,
             leader: applicant.observer_id.clone(),
@@ -159,7 +153,7 @@ fn apply_strategies(
     config: &MasterConfig,
     applicant: &PolicyApplicant,
     stream_info: &mut StreamInfo,
-) -> Vec<super::Command> {
+) -> Vec<Command> {
     if let Some(policy) = stream_info.switch_policy {
         if let Some(cmd) = policy.apply(applicant, stream_info) {
             return vec![cmd];
@@ -383,75 +377,5 @@ impl masterpb::master_server::Master for Server {
         }
 
         Ok(Response::new(masterpb::SealSegmentResponse {}))
-    }
-}
-
-type MasterClient = masterpb::master_client::MasterClient<Channel>;
-
-#[derive(Clone)]
-#[allow(unused)]
-pub(super) struct Client {
-    client: MasterClient,
-}
-
-#[allow(dead_code)]
-impl Client {
-    pub async fn connect(addr: &str) -> crate::Result<Self> {
-        let addr = format!("http://{}", addr);
-        let client = MasterClient::connect(addr).await?;
-        Ok(Client { client })
-    }
-
-    pub async fn create_stream(
-        &self,
-        input: masterpb::CreateStreamRequest,
-    ) -> crate::Result<masterpb::CreateStreamResponse> {
-        let mut client = self.client.clone();
-        let resp = client.create_stream(input).await?;
-        Ok(resp.into_inner())
-    }
-
-    pub async fn list_stream(
-        &self,
-        input: masterpb::ListStreamRequest,
-    ) -> crate::Result<Streaming<masterpb::StreamMeta>> {
-        let mut client = self.client.clone();
-        Ok(client.list_stream(input).await?.into_inner())
-    }
-
-    pub async fn get_stream(
-        &self,
-        input: masterpb::GetStreamRequest,
-    ) -> crate::Result<masterpb::GetStreamResponse> {
-        let mut client = self.client.clone();
-        let resp = client.get_stream(input).await?;
-        Ok(resp.into_inner())
-    }
-
-    pub async fn get_segment(
-        &self,
-        input: masterpb::GetSegmentRequest,
-    ) -> crate::Result<masterpb::GetSegmentResponse> {
-        let mut client = self.client.clone();
-        let resp = client.get_segment(input).await?;
-        Ok(resp.into_inner())
-    }
-
-    pub async fn heartbeat(
-        &self,
-        input: masterpb::HeartbeatRequest,
-    ) -> crate::Result<masterpb::HeartbeatResponse> {
-        let mut client = self.client.clone();
-        let resp = client.heartbeat(input).await?;
-        Ok(resp.into_inner())
-    }
-
-    pub async fn seal_segment(
-        &self,
-        input: masterpb::SealSegmentRequest,
-    ) -> crate::Result<masterpb::SealSegmentResponse> {
-        let mut client = self.client.clone();
-        let resp = client.seal_segment(input).await?;
-        Ok(resp.into_inner())
     }
 }

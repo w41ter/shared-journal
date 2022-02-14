@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use clap::Parser;
-use engula_shared_journal::{MasterConfig, MasterServer};
+use engula_shared_journal::servers::master::mem::{MasterConfig, Server as MasterServer};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 

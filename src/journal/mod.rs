@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod master;
 mod policy;
 pub mod segment;
+pub(crate) mod store;
 pub mod stream;
 mod worker;
 
@@ -30,11 +32,20 @@ use stream::{StreamReader, StreamWriter};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
 pub(crate) use self::policy::Policy as ReplicatePolicy;
-use self::worker::{Action, Channel, Command, Selector};
-use crate::{
-    master::{Master, RemoteMaster},
-    Error, Result, StreamMeta,
+use self::{
+    master::{remote::RemoteMaster, Master},
+    worker::{Action, Channel, Command, Selector},
 };
+use crate::{Error, Result};
+
+/// The meta of a stream.
+#[derive(Clone, Debug)]
+pub struct StreamMeta {
+    /// The internal unique ID of stream.
+    pub stream_id: u64,
+
+    pub stream_name: String,
+}
 
 /// The role of a stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,7 +70,7 @@ pub struct EpochState {
 }
 
 pub struct StreamLister {
-    streaming: crate::master::ListRemoteStream,
+    streaming: master::remote::ListStream,
 }
 
 impl Stream for StreamLister {
@@ -239,7 +250,6 @@ pub struct JournalOption {
 #[allow(unused)]
 pub async fn build_journal(opt: JournalOption) -> Result<Journal> {
     use self::worker::WorkerOption;
-    use crate::master::RemoteMaster;
 
     let master = RemoteMaster::new(&opt.master_url).await?;
     let selector = Selector::new();
@@ -264,61 +274,13 @@ pub async fn build_journal(opt: JournalOption) -> Result<Journal> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, time::Duration};
-
-    use tokio::net::TcpListener;
-    use tokio_stream::wrappers::TcpListenerStream;
+    use std::time::Duration;
 
     use super::*;
-    use crate::{
-        master::mem::{MasterConfig, Server as MasterServer},
-        seg_store::Server,
-    };
-
-    type TResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
-    async fn build_master(replicas: &[&str]) -> TResult<String> {
-        let master_config = MasterConfig {
-            heartbeat_interval_ms: 10,
-            heartbeat_timeout_tick: 3,
-        };
-        let mut segment_meta = HashMap::new();
-        segment_meta.insert("default".to_owned(), 1);
-
-        let replicas: Vec<String> = replicas.iter().map(ToString::to_string).collect();
-        let replicas_clone = replicas.clone();
-        let segment_meta_clone = segment_meta.clone();
-
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let local_addr = listener.local_addr()?;
-        tokio::task::spawn(async {
-            let server = MasterServer::new(master_config, segment_meta_clone, replicas_clone);
-            tonic::transport::Server::builder()
-                .add_service(server.into_service())
-                .serve_with_incoming(TcpListenerStream::new(listener))
-                .await
-                .unwrap();
-        });
-
-        Ok(local_addr.to_string())
-    }
-
-    async fn build_server() -> TResult<String> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let local_addr = listener.local_addr()?;
-        tokio::task::spawn(async move {
-            let server = Server::new();
-            tonic::transport::Server::builder()
-                .add_service(server.into_service())
-                .serve_with_incoming(TcpListenerStream::new(listener))
-                .await
-                .unwrap();
-        });
-        Ok(local_addr.to_string())
-    }
+    use crate::servers::{master::build_master, store::build_seg_store};
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn build_journal_and_run() -> TResult<()> {
+    async fn build_journal_and_run() -> Result<()> {
         let master_addr = build_master(&["a", "b", "c"]).await?;
         let opt = JournalOption {
             local_id: "1".to_owned(),
@@ -332,8 +294,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn stream_writer_append() -> TResult<()> {
-        let server_addr = build_server().await?;
+    async fn stream_writer_append() -> Result<()> {
+        let server_addr = build_seg_store().await?;
         let master_addr = build_master(&[&server_addr]).await?;
         let opt = JournalOption {
             local_id: "1".to_owned(),
@@ -351,8 +313,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn stream_current_state() -> TResult<()> {
-        let server_addr = build_server().await?;
+    async fn stream_current_state() -> Result<()> {
+        let server_addr = build_seg_store().await?;
         let master_addr = build_master(&[&server_addr]).await?;
         let opt = JournalOption {
             local_id: "1".to_owned(),
