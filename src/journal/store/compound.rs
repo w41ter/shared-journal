@@ -29,28 +29,37 @@ use crate::{
     storepb, Entry, Result,
 };
 
-struct Reader {
+// Simple bypass since trait alias is not stable yet.
+mod trait_alias {
+    use super::*;
+
+    type ReadResult = std::result::Result<storepb::ReadResponse, tonic::Status>;
+    pub(crate) trait StreamingReader: Stream<Item = ReadResult> + Unpin {}
+    impl<S> StreamingReader for S where S: Stream<Item = ReadResult> + Unpin {}
+}
+
+use self::trait_alias::StreamingReader;
+
+struct Reader<S: StreamingReader> {
     state: ReaderState,
-    entries_stream: Streaming<storepb::ReadResponse>,
+    entries_stream: S,
 }
 
 /// Read and select pending entries, a bridge record will be appended to the
 /// end of stream.
-pub(crate) struct CompoundSegmentReader {
+pub(crate) struct RawCompoundSegmentReader<S: StreamingReader> {
     policy: GroupReader,
     bridge_entry: Option<Entry>,
-    readers: Vec<Reader>,
+    readers: Vec<Reader<S>>,
 }
 
-impl CompoundSegmentReader {
-    pub fn new(
-        policy: ReplicatePolicy,
-        seg_epoch: u32,
-        next_index: u32,
-        streams: Vec<Streaming<storepb::ReadResponse>>,
-    ) -> Self {
+impl<S> RawCompoundSegmentReader<S>
+where
+    S: StreamingReader,
+{
+    pub fn new(policy: ReplicatePolicy, seg_epoch: u32, next_index: u32, streams: Vec<S>) -> Self {
         let group_policy = policy.new_group_reader(next_index, streams.len());
-        CompoundSegmentReader {
+        RawCompoundSegmentReader {
             bridge_entry: Some(Entry::Bridge { epoch: seg_epoch }),
             policy: group_policy,
             readers: streams
@@ -79,7 +88,10 @@ impl CompoundSegmentReader {
     }
 }
 
-impl Stream for CompoundSegmentReader {
+impl<S> Stream for RawCompoundSegmentReader<S>
+where
+    S: StreamingReader,
+{
     type Item = Result<(u32, Entry)>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -123,3 +135,6 @@ impl Stream for CompoundSegmentReader {
         }
     }
 }
+
+type StreamingReadResponse = Streaming<storepb::ReadResponse>;
+pub(crate) type CompoundSegmentReader = RawCompoundSegmentReader<StreamingReadResponse>;
