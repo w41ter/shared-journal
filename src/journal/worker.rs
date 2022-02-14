@@ -30,9 +30,11 @@ use tokio::{runtime::Handle as RuntimeHandle, sync::mpsc::UnboundedSender};
 
 use super::{EpochState, ReplicatePolicy};
 use crate::{
-    master::{Command as MasterCmd, Master, RemoteMaster},
-    seg_store::segment::{SegmentWriter, WriteRequest},
-    Entry, Error, ObserverState, Result, Role, Sequence, INITIAL_EPOCH,
+    journal::{
+        master::{remote::RemoteMaster, Command as MasterCmd, Master, ObserverMeta, ObserverState},
+        store::segment::{SegmentWriter, WriteRequest},
+    },
+    Entry, Error, Result, Role, Sequence, INITIAL_EPOCH,
 };
 
 /// Store entries for a stream.
@@ -734,7 +736,7 @@ fn send_heartbeat<M>(
     M: Master + Clone + Send + Sync + 'static,
 {
     let stream_name = stream.name.clone();
-    let observer_meta = crate::master::ObserverMeta {
+    let observer_meta = ObserverMeta {
         observer_id,
         stream_name: stream_name.clone(),
         epoch: stream.epoch,
@@ -1166,11 +1168,11 @@ mod recovery {
     use super::{Channel, Command, MemStore, ReplicatePolicy, WriterGroup};
     use crate::{
         journal::{
+            master::{remote::RemoteMaster, Master},
             policy::{GroupReadPolicy, GroupState, ReaderState},
             segment::CompoundSegmentReader,
+            store::{remote::Client, segment::WriteRequest},
         },
-        master::{Master, RemoteMaster},
-        seg_store::{segment::WriteRequest, Client},
         storepb, Entry, Error, Result, SegmentMeta, Sequence,
     };
 
@@ -1387,7 +1389,7 @@ mod tests {
     use tokio::sync::mpsc::unbounded_channel;
 
     use super::*;
-    use crate::master::tests::build_master;
+    use crate::servers::master::build_master;
 
     #[test]
     fn channel_timer_timeout() {

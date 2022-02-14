@@ -12,90 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod mem;
-pub mod segment;
-
-use std::sync::Arc;
-
-use async_trait::async_trait;
-use tokio::sync::Mutex;
-use tonic::{transport::Channel, Request, Response, Status, Streaming};
+use tonic::{transport::Channel, Streaming};
 
 use crate::storepb;
-
-#[derive(Debug)]
-pub struct Server {
-    store: Arc<Mutex<mem::Store>>,
-}
-
-impl Server {
-    pub fn new() -> Self {
-        Server {
-            store: Arc::new(Mutex::new(mem::Store::new())),
-        }
-    }
-
-    pub fn into_service(self) -> storepb::segment_store_server::SegmentStoreServer<Server> {
-        storepb::segment_store_server::SegmentStoreServer::new(self)
-    }
-}
-
-impl Default for Server {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-#[allow(unused)]
-impl storepb::segment_store_server::SegmentStore for Server {
-    type ReadStream = mem::ReplicaReader;
-
-    async fn write(
-        &self,
-        input: Request<storepb::WriteRequest>,
-    ) -> Result<Response<storepb::WriteResponse>, Status> {
-        let req = input.into_inner();
-        let mut store = self.store.lock().await;
-        let persisted_seq = (req.first_index as usize + req.entries.len()) as u64 - 1;
-        store.write(
-            req.stream_id,
-            req.seg_epoch,
-            req.epoch,
-            req.acked_seq.into(),
-            req.first_index,
-            req.entries.into_iter().map(Into::into).collect(),
-        )?;
-
-        // TODO(w41ter) ensure previous sequences is acked.
-        Ok(Response::new(storepb::WriteResponse { persisted_seq }))
-    }
-
-    async fn read(
-        &self,
-        input: Request<storepb::ReadRequest>,
-    ) -> Result<Response<Self::ReadStream>, Status> {
-        let req = input.into_inner();
-        let mut store = self.store.lock().await;
-        let stream = store.read(
-            req.stream_id,
-            req.seg_epoch,
-            req.start_index,
-            req.limit as usize,
-        )?;
-        Ok(Response::new(stream))
-    }
-
-    async fn seal(
-        &self,
-        input: Request<storepb::SealRequest>,
-    ) -> Result<Response<storepb::SealResponse>, Status> {
-        let req = input.into_inner();
-        let mut store = self.store.lock().await;
-        let acked_index = store.seal(req.stream_id, req.seg_epoch, req.epoch)?;
-        Ok(Response::new(storepb::SealResponse { acked_index }))
-    }
-}
 
 type SegmentStoreClient = storepb::segment_store_client::SegmentStoreClient<Channel>;
 
@@ -138,13 +57,10 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-
     use futures::StreamExt;
-    use tokio::net::TcpListener;
-    use tokio_stream::wrappers::TcpListenerStream;
 
     use super::*;
-    use crate::{storepb::ReadRequest, Entry, Sequence};
+    use crate::{servers::store::build_seg_store, storepb::ReadRequest, Entry, Sequence};
 
     fn entry(event: Vec<u8>) -> storepb::Entry {
         storepb::Entry {
@@ -230,17 +146,7 @@ mod tests {
             },
         ];
 
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let local_addr = listener.local_addr()?;
-        tokio::task::spawn(async move {
-            let server = Server::new();
-            tonic::transport::Server::builder()
-                .add_service(server.into_service())
-                .serve_with_incoming(TcpListenerStream::new(listener))
-                .await
-                .unwrap();
-        });
-
+        let local_addr = build_seg_store().await?;
         let client = Client::connect(&local_addr.to_string()).await?;
         for w in writes {
             client.write(w).await?;
@@ -267,17 +173,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn reject_staled_sealing_request() -> crate::Result<()> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let local_addr = listener.local_addr()?;
-        tokio::task::spawn(async move {
-            let server = Server::new();
-            tonic::transport::Server::builder()
-                .add_service(server.into_service())
-                .serve_with_incoming(TcpListenerStream::new(listener))
-                .await
-                .unwrap();
-        });
-
+        let local_addr = build_seg_store().await?;
         let client = Client::connect(&local_addr.to_string()).await?;
         client
             .seal(storepb::SealRequest {
@@ -314,17 +210,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn reject_staled_store_if_sealed() -> crate::Result<()> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let local_addr = listener.local_addr()?;
-        tokio::task::spawn(async move {
-            let server = Server::new();
-            tonic::transport::Server::builder()
-                .add_service(server.into_service())
-                .serve_with_incoming(TcpListenerStream::new(listener))
-                .await
-                .unwrap();
-        });
-
+        let local_addr = build_seg_store().await?;
         let client = Client::connect(&local_addr.to_string()).await?;
         let write_req = storepb::WriteRequest {
             stream_id: 1,

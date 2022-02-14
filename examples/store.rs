@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use clap::Parser;
-use engula_shared_journal::StoreServer;
+use engula_shared_journal::servers::store::mem::Server as StoreServer;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 

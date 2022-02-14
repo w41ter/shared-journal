@@ -19,9 +19,11 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
+use async_trait::async_trait;
 use futures::Stream;
 use log::warn;
-use tonic::Status;
+use tokio::sync::Mutex as TokioMutex;
+use tonic::{Request, Response, Status};
 
 use crate::{storepb, Entry, Sequence};
 
@@ -266,5 +268,79 @@ impl Store {
 
         replica.sealed = Some(writer_epoch);
         Ok(replica.acked_index.unwrap_or_default())
+    }
+}
+
+#[derive(Debug)]
+pub struct Server {
+    store: Arc<TokioMutex<Store>>,
+}
+
+impl Server {
+    pub fn new() -> Self {
+        Server {
+            store: Arc::new(TokioMutex::new(Store::new())),
+        }
+    }
+
+    pub fn into_service(self) -> storepb::segment_store_server::SegmentStoreServer<Server> {
+        storepb::segment_store_server::SegmentStoreServer::new(self)
+    }
+}
+
+impl Default for Server {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+#[allow(unused)]
+impl storepb::segment_store_server::SegmentStore for Server {
+    type ReadStream = ReplicaReader;
+
+    async fn write(
+        &self,
+        input: Request<storepb::WriteRequest>,
+    ) -> Result<Response<storepb::WriteResponse>, Status> {
+        let req = input.into_inner();
+        let mut store = self.store.lock().await;
+        let persisted_seq = (req.first_index as usize + req.entries.len()) as u64 - 1;
+        store.write(
+            req.stream_id,
+            req.seg_epoch,
+            req.epoch,
+            req.acked_seq.into(),
+            req.first_index,
+            req.entries.into_iter().map(Into::into).collect(),
+        )?;
+
+        // TODO(w41ter) ensure previous sequences is acked.
+        Ok(Response::new(storepb::WriteResponse { persisted_seq }))
+    }
+
+    async fn read(
+        &self,
+        input: Request<storepb::ReadRequest>,
+    ) -> Result<Response<Self::ReadStream>, Status> {
+        let req = input.into_inner();
+        let mut store = self.store.lock().await;
+        let stream = store.read(
+            req.stream_id,
+            req.seg_epoch,
+            req.start_index,
+            req.limit as usize,
+        )?;
+        Ok(Response::new(stream))
+    }
+
+    async fn seal(
+        &self,
+        input: Request<storepb::SealRequest>,
+    ) -> Result<Response<storepb::SealResponse>, Status> {
+        let req = input.into_inner();
+        let mut store = self.store.lock().await;
+        let acked_index = store.seal(req.stream_id, req.seg_epoch, req.epoch)?;
+        Ok(Response::new(storepb::SealResponse { acked_index }))
     }
 }

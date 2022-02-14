@@ -30,7 +30,7 @@ use futures::{StreamExt, TryStreamExt};
 use lazy_static::lazy_static;
 use tonic::Streaming;
 
-use super::Client;
+use super::remote::Client;
 use crate::{
     journal::{segment::CompoundSegmentReader, ReplicatePolicy},
     storepb, Entry, Error, Result, Sequence,

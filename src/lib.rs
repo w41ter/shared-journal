@@ -19,12 +19,9 @@ extern crate derivative;
 
 mod error;
 mod journal;
-mod master;
 mod proto;
-mod seg_store;
 
-pub use master::mem::{MasterConfig, Server as MasterServer};
-pub use seg_store::Server as StoreServer;
+pub mod servers;
 
 pub use self::{
     error::{Error, Result},
@@ -35,7 +32,7 @@ pub use self::{
     },
 };
 use self::{
-    master::{ObserverState, StreamMeta},
+    journal::master::ObserverState,
     proto::{master as masterpb, seg_store as storepb},
 };
 
