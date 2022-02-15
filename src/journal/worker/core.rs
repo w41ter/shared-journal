@@ -120,8 +120,16 @@ impl StreamStateMachine {
         leader: String,
         copy_set: Vec<String>,
         pending_epochs: Vec<u32>,
-    ) {
-        self.epoch = epoch;
+    ) -> bool {
+        if self.epoch >= epoch {
+            warn!(
+                "stream {} epoch {} reject staled promote, epoch: {}, role: {:?}, leader: {}",
+                self.stream_id, self.epoch, epoch, role, leader
+            );
+            return false;
+        }
+
+        let prev_epoch = std::mem::replace(&mut self.epoch, epoch);
         self.state = match role {
             Role::Leader => ObserverState::Leading,
             Role::Follower => ObserverState::Following,
@@ -139,15 +147,25 @@ impl StreamStateMachine {
         // `StreamStateMachine::handle_recovered` for details.
         self.pending_epochs.sort_by(|a, b| b.cmp(a));
         self.ready.pending_epoch = self.pending_epochs.last().cloned();
+
+        info!(
+            "stream {} promote epoch from {} to {}, new role: {:?}, leader: {}",
+            self.stream_id, prev_epoch, epoch, self.role, self.leader
+        );
+
+        true
     }
 
     pub fn step(&mut self, msg: Message) {
         match msg.detail {
             MsgDetail::Received { index } => {
-                if self.role == Role::Leader {
+                if self.role == Role::Leader && msg.epoch == self.epoch {
                     self.handle_received(msg.target, msg.epoch, index);
                 } else {
-                    todo!("log staled message");
+                    warn!(
+                        "stream {} epoch {} ignore staled received, index: {}, epoch {}",
+                        self.stream_id, self.epoch, index, msg.epoch
+                    );
                 }
             }
             MsgDetail::Store {
@@ -267,7 +285,7 @@ impl StreamStateMachine {
         }
     }
 
-    pub fn handle_received(&mut self, target: String, epoch: u32, index: u32) {
+    fn handle_received(&mut self, target: String, epoch: u32, index: u32) {
         debug_assert_eq!(self.role, Role::Leader);
         if let Some(progress) = self.copy_set.get_mut(&target) {
             if progress.on_received(epoch, index) {
@@ -304,5 +322,70 @@ impl StreamStateMachine {
             }
             _ => panic!("should't happen"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_leader_receives_proposal() {
+        let mut sm = StreamStateMachine::new("default".into(), 1);
+        let state = sm.epoch_state();
+        assert_eq!(state.role, Role::Follower);
+
+        match sm.propose(Box::new([0u8])) {
+            Err(Error::NotLeader(_)) => {}
+            _ => panic!("follower do not receive proposal"),
+        }
+
+        sm.promote(
+            state.epoch as u32 + 1,
+            Role::Leader,
+            "self".into(),
+            vec![],
+            vec![],
+        );
+
+        let state = sm.epoch_state();
+        assert_eq!(state.role, Role::Leader);
+
+        match sm.propose(Box::new([0u8])) {
+            Ok(_) => {}
+            _ => panic!("leader must receive proposal"),
+        }
+    }
+
+    #[test]
+    fn reject_staled_promote_request() {
+        let mut sm = StreamStateMachine::new("default".into(), 1);
+        let state = sm.epoch_state();
+        assert_eq!(state.role, Role::Follower);
+
+        let target_epoch = state.epoch + 2;
+        assert!(sm.promote(
+            target_epoch as u32,
+            Role::Leader,
+            "self".into(),
+            vec![],
+            vec![],
+        ));
+
+        let state = sm.epoch_state();
+        assert_eq!(state.role, Role::Leader);
+        assert_eq!(state.epoch, target_epoch);
+
+        assert!(!sm.promote(
+            (target_epoch - 1) as u32,
+            Role::Leader,
+            "self".into(),
+            vec![],
+            vec![]
+        ));
+
+        let state = sm.epoch_state();
+        assert_eq!(state.role, Role::Leader);
+        assert_eq!(state.epoch, target_epoch);
     }
 }
