@@ -426,4 +426,49 @@ pub(crate) mod tests {
 
         Ok(())
     }
+
+    /// If observer lost the heartbeat response, it should receive and continue
+    /// the previous promote request.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn heartbeat_idempotent() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let replicas = vec!["a", "b", "c"];
+        let local_addr = build_master(&replicas).await?;
+        let master = RemoteMaster::new(&local_addr.to_string()).await?;
+        let observer_meta = ObserverMeta {
+            observer_id: "1".to_owned(),
+            stream_name: "default".to_owned(),
+            epoch: 0,
+            state: ObserverState::Following,
+            acked_seq: Sequence::new(1, 0),
+        };
+        let commands = master.heartbeat(observer_meta).await?;
+        let prev_promote = commands
+            .iter()
+            .find(|cmd| matches!(cmd, Command::Promote { role, .. } if *role == Role::Leader))
+            .unwrap();
+        let observer_meta = ObserverMeta {
+            observer_id: "1".to_owned(),
+            stream_name: "default".to_owned(),
+            epoch: 0,
+            state: ObserverState::Following,
+            acked_seq: Sequence::new(1, 0),
+        };
+        let commands = master.heartbeat(observer_meta).await?;
+        let new_promote = commands
+            .iter()
+            .find(|cmd| matches!(cmd, Command::Promote { role, .. } if *role == Role::Leader))
+            .unwrap();
+        match (prev_promote, new_promote) {
+            (
+                Command::Promote {
+                    epoch: prev_epoch, ..
+                },
+                Command::Promote {
+                    epoch: new_epoch, ..
+                },
+            ) if prev_epoch == new_epoch => {}
+            _ => panic!("shouldn't happen"),
+        }
+        Ok(())
+    }
 }
