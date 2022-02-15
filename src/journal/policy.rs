@@ -85,7 +85,7 @@ impl From<Policy> for GroupPolicy {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub(super) enum GroupState {
     Pending,
     Active,
@@ -117,14 +117,14 @@ impl GroupReader {
     }
 
     pub(super) fn state(&self) -> GroupState {
+        let majority = self.majority();
         match self.policy {
             GroupPolicy::Simple if self.num_ready >= 1 => GroupState::Active,
-            GroupPolicy::Majority
-                if self.num_ready > 0 && self.num_ready + self.num_done >= self.majority() =>
-            {
+            GroupPolicy::Majority if self.num_ready >= majority => GroupState::Active,
+            GroupPolicy::Majority if self.num_done >= majority => GroupState::Done,
+            GroupPolicy::Majority if self.num_ready + self.num_done >= majority => {
                 GroupState::Active
             }
-            GroupPolicy::Majority if self.num_done >= self.majority() => GroupState::Done,
             _ if self.num_done == self.num_copies => GroupState::Done,
             _ => GroupState::Pending,
         }
@@ -324,6 +324,98 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn group_reader_state() {
+        #[derive(Debug)]
+        struct TestCase {
+            num_copies: usize,
+            num_ready: usize,
+            num_done: usize,
+            group_policy: GroupPolicy,
+            expect_state: GroupState,
+        }
+        let cases = vec![
+            // 1. simple policy pending
+            TestCase {
+                num_copies: 1,
+                num_ready: 0,
+                num_done: 0,
+                group_policy: GroupPolicy::Simple,
+                expect_state: GroupState::Pending,
+            },
+            // 2. simple policy active
+            TestCase {
+                num_copies: 1,
+                num_ready: 1,
+                num_done: 0,
+                group_policy: GroupPolicy::Simple,
+                expect_state: GroupState::Active,
+            },
+            // 3. simple policy done
+            TestCase {
+                num_copies: 1,
+                num_ready: 0,
+                num_done: 1,
+                group_policy: GroupPolicy::Simple,
+                expect_state: GroupState::Done,
+            },
+            // 4. simple policy active but some copies already done.
+            TestCase {
+                num_copies: 2,
+                num_ready: 1,
+                num_done: 1,
+                group_policy: GroupPolicy::Simple,
+                expect_state: GroupState::Active,
+            },
+            // 5. majority policy pending
+            TestCase {
+                num_copies: 3,
+                num_ready: 1,
+                num_done: 0,
+                group_policy: GroupPolicy::Majority,
+                expect_state: GroupState::Pending,
+            },
+            // 6. majority policy active
+            TestCase {
+                num_copies: 3,
+                num_ready: 2,
+                num_done: 0,
+                group_policy: GroupPolicy::Majority,
+                expect_state: GroupState::Active,
+            },
+            // 7. majority policy active but partial done
+            TestCase {
+                num_copies: 3,
+                num_ready: 1,
+                num_done: 1,
+                group_policy: GroupPolicy::Majority,
+                expect_state: GroupState::Active,
+            },
+            // 8. majority policy done
+            TestCase {
+                num_copies: 3,
+                num_ready: 0,
+                num_done: 2,
+                group_policy: GroupPolicy::Majority,
+                expect_state: GroupState::Done,
+            },
+            // 9. majority policy active although majority done, this is expected for recovering.
+            TestCase {
+                num_copies: 3,
+                num_ready: 1,
+                num_done: 2,
+                group_policy: GroupPolicy::Majority,
+                expect_state: GroupState::Done,
+            },
+        ];
+        for case in cases {
+            let mut reader = GroupReader::new(case.group_policy, 1, case.num_copies);
+            reader.num_ready = case.num_ready;
+            reader.num_done = case.num_done;
+            assert_eq!(reader.state(), case.expect_state, "{:?}", case);
         }
     }
 }
