@@ -71,132 +71,30 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn basic_write_and_read_acked() -> crate::Result<()> {
+    async fn basic_store_and_read() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let writes = vec![
             storepb::WriteRequest {
                 stream_id: 1,
                 seg_epoch: 1,
                 epoch: 1,
                 acked_seq: 0,
-                first_index: 1,
+                first_index: 0,
                 entries: vec![entry(vec![0u8]), entry(vec![2u8]), entry(vec![4u8])],
             },
             storepb::WriteRequest {
                 stream_id: 1,
                 seg_epoch: 1,
                 epoch: 1,
-                acked_seq: Sequence::new(1, 3).into(),
-                first_index: 4,
+                acked_seq: Sequence::new(1, 2).into(),
+                first_index: 3,
                 entries: vec![entry(vec![6u8]), entry(vec![8u8])],
             },
             storepb::WriteRequest {
                 stream_id: 1,
                 seg_epoch: 1,
                 epoch: 1,
-                acked_seq: Sequence::new(1, 5).into(),
-                first_index: 6,
-                entries: vec![],
-            },
-        ];
-
-        let entries = vec![
-            Entry::Event {
-                epoch: 1,
-                event: vec![0u8].into(),
-            },
-            Entry::Event {
-                epoch: 1,
-                event: vec![2u8].into(),
-            },
-            Entry::Event {
-                epoch: 1,
-                event: vec![4u8].into(),
-            },
-            Entry::Event {
-                epoch: 1,
-                event: vec![6u8].into(),
-            },
-            Entry::Event {
-                epoch: 1,
-                event: vec![8u8].into(),
-            },
-        ];
-
-        #[derive(Debug)]
-        struct Test<'a> {
-            from: u32,
-            limit: u32,
-            expect: &'a [Entry],
-        }
-
-        let tests = vec![
-            Test {
-                from: 1,
-                limit: 1,
-                expect: &entries[0..1],
-            },
-            Test {
-                from: 4,
-                limit: 2,
-                expect: &entries[3..],
-            },
-            Test {
-                from: 1,
-                limit: 5,
-                expect: &entries[..],
-            },
-        ];
-
-        let local_addr = build_seg_store().await?;
-        let client = Client::connect(&local_addr.to_string()).await?;
-        for w in writes {
-            client.write(w).await?;
-        }
-
-        for test in tests {
-            let req = ReadRequest {
-                stream_id: 1,
-                seg_epoch: 1,
-                start_index: test.from,
-                limit: test.limit,
-                include_pending_entries: false,
-            };
-            let mut stream = client.read(req).await?;
-            let mut got = Vec::<Entry>::new();
-            while let Some(resp) = stream.next().await {
-                got.push(resp?.entry.unwrap().into());
-            }
-            assert_eq!(got.len(), test.expect.len());
-            assert!(got.iter().zip(test.expect.iter()).all(|(l, r)| l == r));
-        }
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn basic_write_and_read_including_pending_entries() -> crate::Result<()> {
-        let writes = vec![
-            storepb::WriteRequest {
-                stream_id: 1,
-                seg_epoch: 1,
-                epoch: 1,
-                acked_seq: 0,
-                first_index: 1,
-                entries: vec![entry(vec![0u8]), entry(vec![2u8]), entry(vec![4u8])],
-            },
-            storepb::WriteRequest {
-                stream_id: 1,
-                seg_epoch: 1,
-                epoch: 1,
-                acked_seq: 0,
-                first_index: 4,
-                entries: vec![entry(vec![6u8]), entry(vec![8u8])],
-            },
-            storepb::WriteRequest {
-                stream_id: 1,
-                seg_epoch: 1,
-                epoch: 1,
-                acked_seq: 0,
-                first_index: 6,
+                acked_seq: Sequence::new(1, 4).into(),
+                first_index: 5,
                 entries: vec![],
             },
         ];
@@ -232,24 +130,18 @@ mod tests {
 
         let tests = vec![
             Test {
-                from: 1,
+                from: 0,
                 limit: 1,
                 expect: &entries[0..1],
             },
             Test {
-                from: 4,
+                from: 3,
                 limit: 2,
                 expect: &entries[3..],
             },
             Test {
-                from: 1,
+                from: 0,
                 limit: 5,
-                expect: &entries[..],
-            },
-            // include_pending_entries don't wait any entries
-            Test {
-                from: 1,
-                limit: u32::MAX,
                 expect: &entries[..],
             },
         ];
@@ -317,7 +209,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn reject_staled_writing_if_sealed() -> crate::Result<()> {
+    async fn reject_staled_store_if_sealed() -> crate::Result<()> {
         let local_addr = build_seg_store().await?;
         let client = Client::connect(&local_addr.to_string()).await?;
         let write_req = storepb::WriteRequest {
@@ -353,98 +245,6 @@ mod tests {
             }
         };
 
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn remove_entries_once_receiving_bridge_entry() -> crate::Result<()> {
-        let local_addr = build_seg_store().await?;
-        let client = Client::connect(&local_addr.to_string()).await?;
-        let write_req = storepb::WriteRequest {
-            stream_id: 1,
-            seg_epoch: 1,
-            epoch: 1,
-            acked_seq: 0,
-            first_index: 1,
-            entries: vec![entry(vec![1u8]), entry(vec![2u8]), entry(vec![3u8])],
-        };
-        client.write(write_req).await?;
-
-        let write_req = storepb::WriteRequest {
-            stream_id: 1,
-            seg_epoch: 1,
-            epoch: 1,
-            acked_seq: 0,
-            first_index: 5,
-            entries: vec![entry(vec![5u8])],
-        };
-        client.write(write_req).await?;
-
-        client
-            .seal(storepb::SealRequest {
-                stream_id: 1,
-                seg_epoch: 1,
-                epoch: 3,
-            })
-            .await?;
-
-        let read_expect: Vec<Entry> = vec![
-            entry(vec![1u8]).into(),
-            entry(vec![2u8]).into(),
-            entry(vec![3u8]).into(),
-            entry(vec![5u8]).into(),
-        ];
-        let req = ReadRequest {
-            stream_id: 1,
-            seg_epoch: 1,
-            start_index: 1,
-            limit: u32::MAX,
-            include_pending_entries: true,
-        };
-        let mut stream = client.read(req).await?;
-        let mut got = Vec::<Entry>::new();
-        while let Some(resp) = stream.next().await {
-            got.push(resp?.entry.unwrap().into());
-        }
-        assert_eq!(got.len(), read_expect.len());
-        assert!(got.iter().zip(read_expect.iter()).all(|(l, r)| l == r));
-
-        // send bridge record
-        let bridge = storepb::Entry {
-            entry_type: storepb::EntryType::Bridge as i32,
-            epoch: 3,
-            event: Vec::default(),
-        };
-        let write_req = storepb::WriteRequest {
-            stream_id: 1,
-            seg_epoch: 1,
-            epoch: 3,
-            acked_seq: 0,
-            first_index: 4,
-            entries: vec![bridge.clone()],
-        };
-        client.write(write_req).await?;
-
-        let read_expect: Vec<Entry> = vec![
-            entry(vec![1u8]).into(),
-            entry(vec![2u8]).into(),
-            entry(vec![3u8]).into(),
-            bridge.into(),
-        ];
-        let req = ReadRequest {
-            stream_id: 1,
-            seg_epoch: 1,
-            start_index: 1,
-            limit: u32::MAX,
-            include_pending_entries: true,
-        };
-        let mut stream = client.read(req).await?;
-        let mut got = Vec::<Entry>::new();
-        while let Some(resp) = stream.next().await {
-            got.push(resp?.entry.unwrap().into());
-        }
-        assert_eq!(got.len(), read_expect.len());
-        assert!(got.iter().zip(read_expect.iter()).all(|(l, r)| l == r));
         Ok(())
     }
 }
