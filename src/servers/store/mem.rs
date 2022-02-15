@@ -48,9 +48,6 @@ impl Replica {
     }
 
     fn store(&mut self, first_index: u32, entries: Vec<Entry>) -> Result<(), Status> {
-        // TODO(w41ter)
-        //  1. truncate other entries if it receive a bridge entry.
-        //  2. wake up reader's if it is sealed? (eg, bridge entry is acked)
         for (off, entry) in entries.into_iter().enumerate() {
             let index = first_index + (off as u32);
             if self.bridge.map(|idx| index > idx).unwrap_or_default() {
@@ -60,8 +57,9 @@ impl Replica {
             }
             if let Entry::Bridge { epoch: _ } = &entry {
                 self.bridge = Some(index);
+                self.entries.split_off(&index);
             }
-            self.entries.insert(first_index + (off as u32), entry);
+            self.entries.insert(index, entry);
         }
         Ok(())
     }
@@ -85,6 +83,10 @@ impl Replica {
         std::mem::take(&mut self.wakers)
             .into_iter()
             .for_each(Waker::wake);
+    }
+
+    fn is_index_acked(&self, index: u32) -> bool {
+        self.acked_index.map(|i| i >= index).unwrap_or_default()
     }
 }
 
@@ -110,6 +112,7 @@ pub struct ReplicaReader {
     next_index: u32,
     limit: usize,
     finished: bool,
+    include_pending_entries: bool,
 
     replica: SharedReplica,
 }
@@ -124,28 +127,29 @@ impl Stream for ReplicaReader {
         }
 
         let mut replica = this.replica.lock().unwrap();
-        if let Some(acked_index) = &replica.acked_index {
-            if let Some((index, entry)) = replica.entries.range(this.next_index..).next() {
-                // Continuous and acked.
-                if acked_index < index || *index == this.next_index {
-                    // End of segment.
-                    if let Entry::Bridge { epoch: _ } = entry {
-                        this.finished = true;
-                    }
-                    this.next_index += 1;
-                    this.limit -= 1;
-                    if this.limit == 0 {
-                        this.finished = true;
-                    }
-
-                    let resp = storepb::ReadResponse {
-                        index: *index,
-                        entry: Some(entry.clone().into()),
-                    };
-
-                    return Poll::Ready(Some(Ok(resp)));
+        if let Some((index, entry)) = replica.entries.range(this.next_index..).next() {
+            if this.include_pending_entries
+                || (*index == this.next_index && replica.is_index_acked(*index))
+            {
+                // End of segment.
+                if let Entry::Bridge { epoch: _ } = entry {
+                    this.finished = true;
                 }
+                this.next_index = *index + 1;
+                this.limit -= 1;
+                if this.limit == 0 {
+                    this.finished = true;
+                }
+
+                let resp = storepb::ReadResponse {
+                    index: *index,
+                    entry: Some(entry.clone().into()),
+                };
+
+                return Poll::Ready(Some(Ok(resp)));
             }
+        } else if this.include_pending_entries {
+            return Poll::Ready(None);
         }
 
         replica.wakers.push(cx.waker().clone());
@@ -220,6 +224,7 @@ impl Store {
         seg_epoch: u32,
         start_index: u32,
         limit: usize,
+        include_pending_entries: bool,
     ) -> Result<ReplicaReader, Status> {
         let stream = match self.streams.get_mut(&stream_id) {
             Some(s) => s,
@@ -236,6 +241,7 @@ impl Store {
             limit,
             finished: limit == 0,
             replica: replica.clone(),
+            include_pending_entries,
         })
     }
 
@@ -329,6 +335,7 @@ impl storepb::segment_store_server::SegmentStore for Server {
             req.seg_epoch,
             req.start_index,
             req.limit as usize,
+            req.include_pending_entries,
         )?;
         Ok(Response::new(stream))
     }
