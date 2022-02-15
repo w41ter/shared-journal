@@ -21,6 +21,7 @@ use std::{
 
 use async_trait::async_trait;
 use futures::stream;
+use log::info;
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 
@@ -119,6 +120,14 @@ impl StreamInfo {
         }
     }
 
+    fn leader_desc(&self) -> &str {
+        if let Some(leader) = self.leader.as_ref() {
+            leader
+        } else {
+            ""
+        }
+    }
+
     fn observe(&mut self, observer_id: String, observer_info: ObserverInfo) {
         let acked_seq = observer_info.meta.acked_seq;
         let acked_epoch = acked_seq.epoch;
@@ -147,6 +156,26 @@ impl StreamInfo {
             pending_epochs: vec![],
         }
     }
+
+    fn gen_promote_cmd(&self, observer_id: &str) -> Command {
+        // TODO(w41ter) set pending epochs.
+        if let Some(leader) = &self.leader {
+            if leader == observer_id {
+                return Command::Promote {
+                    role: Role::Leader,
+                    epoch: self.epoch,
+                    leader: observer_id.to_string(),
+                    pending_epochs: vec![],
+                };
+            }
+        }
+        Command::Promote {
+            role: Role::Follower,
+            epoch: self.epoch,
+            leader: self.leader.as_ref().cloned().unwrap_or_default(),
+            pending_epochs: vec![],
+        }
+    }
 }
 
 fn apply_strategies(
@@ -158,6 +187,17 @@ fn apply_strategies(
         if let Some(cmd) = policy.apply(applicant, stream_info) {
             return vec![cmd];
         }
+    }
+
+    // stale request, promote it
+    if applicant.epoch < stream_info.epoch {
+        // The observer might lost heartbeat response, so here check and accept
+        // the staled heartbeat request from current leader, and continue to promote
+        // it for idempotent.
+        info!("stream {} epoch {} leader {} promote observer {}, epoch: {}, by receiving staled heartbeat",
+            stream_info.stream_id, stream_info.epoch, stream_info.leader_desc(),
+            applicant.observer_id, applicant.epoch);
+        return vec![stream_info.gen_promote_cmd(&applicant.observer_id)];
     }
 
     // check leader
