@@ -391,16 +391,7 @@ mod tests {
                 ],
                 next_index: 1,
                 writer_epoch: 8,
-                expects: vec![
-                    ee(1, 1),
-                    ee(2, 1),
-                    ee(3, 3),
-                    ee(4, 3),
-                    ee(5, 3),
-                    eh(), // six not found
-                    ee(7, 4),
-                    eb(8),
-                ],
+                expects: vec![ee(1, 1), ee(2, 1), ee(3, 3), ee(4, 3), ee(5, 3), eb(8)],
             },
             TestCase {
                 desc: "6. one replica done early and exists pending.",
