@@ -71,7 +71,6 @@ pub(crate) struct ObserverMeta {
 
 /// The commands of a master must be completed by a stream observer.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) enum Command {
     Nop,
 

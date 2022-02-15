@@ -378,6 +378,42 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn heartbeat_promote_leader_or_followers(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let replicas = vec!["a", "b", "c"];
+        let local_addr = build_master(&replicas).await?;
+        let master = RemoteMaster::new(&local_addr.to_string()).await?;
+        let observer_meta = ObserverMeta {
+            observer_id: "1".to_owned(),
+            stream_name: "default".to_owned(),
+            epoch: 0,
+            state: ObserverState::Following,
+            acked_seq: Sequence::new(1, 0),
+        };
+        let commands = master.heartbeat(observer_meta).await?;
+        let promote = commands
+            .iter()
+            .find(|cmd| matches!(cmd, Command::Promote { role, .. } if *role == Role::Leader));
+        assert!(promote.is_some());
+
+        // Now a follower send heartbeat request and receive promote request.
+        let observer_meta = ObserverMeta {
+            observer_id: "2".to_owned(),
+            stream_name: "default".to_owned(),
+            epoch: 0,
+            state: ObserverState::Following,
+            acked_seq: Sequence::new(1, 0),
+        };
+        let commands = master.heartbeat(observer_meta).await?;
+        println!("commands {:?}", commands);
+        let promote = commands
+            .iter()
+            .find(|cmd| matches!(cmd, Command::Promote { role, .. } if *role == Role::Follower));
+        assert!(promote.is_some());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn seal_segment() -> Result<()> {
         let master_addr = build_master(&[]).await?;
         let master = RemoteMaster::new(&master_addr).await?;
