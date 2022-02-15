@@ -214,3 +214,116 @@ mod simple {
         acked_indexes.iter().max().cloned()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Group reader must reject staled (index less than next_index)
+    /// transforming request.
+    #[test]
+    fn group_reader_ignore_staled_request() {
+        let mut reader = GroupReader::new(GroupPolicy::Simple, 123, 3);
+        let mut state = ReaderState::Polling;
+
+        reader.transform(&mut state, Some((122, Entry::Hole)));
+        assert!(matches!(state, ReaderState::Polling));
+        assert_eq!(reader.num_ready, 0);
+        assert_eq!(reader.num_done, 0);
+    }
+
+    fn ee(index: u32, epoch: u32) -> Entry {
+        let event: Vec<u8> = index.to_le_bytes().as_slice().into();
+        Entry::Event {
+            epoch,
+            event: event.into(),
+        }
+    }
+
+    #[test]
+    fn group_reader_next_entry_basic() {
+        struct TestCase {
+            desc: &'static str,
+            states: Vec<ReaderState>,
+            expects: Vec<Option<Entry>>,
+        }
+
+        let cases = vec![
+            TestCase {
+                desc: "1. return largest entry",
+                states: vec![
+                    ReaderState::Ready {
+                        index: 1,
+                        entry: ee(2, 2),
+                    },
+                    ReaderState::Ready {
+                        index: 1,
+                        entry: ee(2, 1),
+                    },
+                    ReaderState::Ready {
+                        index: 1,
+                        entry: ee(2, 3),
+                    },
+                ],
+                expects: vec![Some(ee(2, 3))],
+            },
+            TestCase {
+                desc: "2. allow pending state",
+                states: vec![
+                    ReaderState::Polling,
+                    ReaderState::Ready {
+                        index: 1,
+                        entry: ee(2, 2),
+                    },
+                    ReaderState::Ready {
+                        index: 1,
+                        entry: ee(2, 1),
+                    },
+                ],
+                expects: vec![Some(ee(2, 2))],
+            },
+            TestCase {
+                desc: "3. returns hole if no such index entry exists",
+                states: vec![
+                    ReaderState::Ready {
+                        index: 2,
+                        entry: ee(2, 2),
+                    },
+                    ReaderState::Ready {
+                        index: 4,
+                        entry: ee(4, 2),
+                    },
+                    ReaderState::Ready {
+                        index: 6,
+                        entry: ee(6, 8),
+                    },
+                ],
+                expects: vec![
+                    None,
+                    Some(ee(2, 2)),
+                    None,
+                    Some(ee(4, 2)),
+                    None,
+                    Some(ee(6, 8)),
+                ],
+            },
+        ];
+
+        for mut case in cases {
+            let mut reader = GroupReader::new(GroupPolicy::Simple, 1, 3);
+            reader.num_ready = 3;
+            for expect in case.expects {
+                let entry = reader.next_entry(case.states.iter_mut());
+                match expect {
+                    Some(e) => {
+                        assert!(entry.is_some(), "case: {}", case.desc);
+                        assert_eq!(entry.unwrap(), e, "case: {}", case.desc);
+                    }
+                    None => {
+                        assert!(entry.is_none(), "case: {}", case.desc);
+                    }
+                }
+            }
+        }
+    }
+}
