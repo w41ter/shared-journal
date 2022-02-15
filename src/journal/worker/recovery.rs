@@ -237,7 +237,7 @@ fn seal(
 mod tests {
     use super::*;
     use crate::{
-        journal::worker::{MsgDetail, StreamStateMachine},
+        journal::worker::{Message, MsgDetail, StreamStateMachine},
         Role,
     };
 
@@ -265,7 +265,12 @@ mod tests {
             {
                 if !entries.is_empty() {
                     let index = first_index + entries.len() as u32 - 1;
-                    sm.handle_received(msg.target.clone(), msg.epoch, index);
+                    sm.step(Message {
+                        target: msg.target.clone(),
+                        seg_epoch: msg.epoch,
+                        epoch: msg.epoch,
+                        detail: MsgDetail::Received { index },
+                    });
                 }
             }
         }
@@ -323,7 +328,12 @@ mod tests {
             {
                 if !entries.is_empty() {
                     let index = first_index + entries.len() as u32 - 1;
-                    sm.handle_received(msg.target.clone(), msg.epoch, index);
+                    sm.step(Message {
+                        target: msg.target.clone(),
+                        seg_epoch: msg.epoch,
+                        epoch: msg.epoch,
+                        detail: MsgDetail::Received { index },
+                    });
                 }
             }
         }
