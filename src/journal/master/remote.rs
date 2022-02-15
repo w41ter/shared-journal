@@ -391,10 +391,9 @@ pub(crate) mod tests {
             acked_seq: Sequence::new(1, 0),
         };
         let commands = master.heartbeat(observer_meta).await?;
-        let promote = commands.iter().find(|cmd| match cmd {
-            Command::Promote { role, .. } if *role == Role::Leader => true,
-            _ => false,
-        });
+        let promote = commands
+            .iter()
+            .find(|cmd| matches!(cmd, Command::Promote { role, .. } if *role == Role::Leader));
         assert!(promote.is_some());
 
         // Now a follower send heartbeat request and receive promote request.
@@ -407,10 +406,9 @@ pub(crate) mod tests {
         };
         let commands = master.heartbeat(observer_meta).await?;
         println!("commands {:?}", commands);
-        let promote = commands.iter().find(|cmd| match cmd {
-            Command::Promote { role, .. } if *role == Role::Follower => true,
-            _ => false,
-        });
+        let promote = commands
+            .iter()
+            .find(|cmd| matches!(cmd, Command::Promote { role, .. } if *role == Role::Follower));
         assert!(promote.is_some());
         Ok(())
     }
