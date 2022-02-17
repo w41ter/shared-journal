@@ -131,7 +131,7 @@ impl SegmentWriter {
     }
 
     /// Store continuously entries with assigned index.
-    pub async fn write(&mut self, write: WriteRequest) -> Result<Sequence> {
+    pub async fn write(&mut self, write: WriteRequest) -> Result<u32> {
         if write.index == 0 {
             return Err(Error::InvalidArgument(
                 "index should always greater than zero".to_owned(),
@@ -152,7 +152,7 @@ impl SegmentWriter {
 
         let resp = client.write(req).await?;
 
-        Ok(resp.persisted_seq.into())
+        Ok(resp.persisted_index)
     }
 
     async fn get_client(&mut self) -> Result<Client> {

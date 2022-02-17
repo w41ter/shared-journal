@@ -34,6 +34,7 @@ struct Replica {
     wakers: Vec<Waker>,
     entries: BTreeMap<u32, Entry>,
     sealed: Option<u32>,
+    expect_index: u32,
 }
 
 impl Replica {
@@ -44,6 +45,7 @@ impl Replica {
             wakers: Vec::new(),
             entries: BTreeMap::new(),
             sealed: None,
+            expect_index: 1,
         }
     }
 
@@ -61,6 +63,14 @@ impl Replica {
             }
             self.entries.insert(index, entry);
         }
+
+        for (idx, _) in self.entries.range(self.expect_index..) {
+            if *idx != self.expect_index {
+                break;
+            }
+            self.expect_index += 1;
+        }
+
         Ok(())
     }
 
@@ -87,6 +97,11 @@ impl Replica {
 
     fn is_index_acked(&self, index: u32) -> bool {
         self.acked_index.map(|i| i >= index).unwrap_or_default()
+    }
+
+    /// Returns the last index of continuously entries.
+    fn continuously_persisted_index(&self) -> u32 {
+        self.expect_index.saturating_sub(1)
     }
 }
 
@@ -178,7 +193,7 @@ impl Store {
         acked_seq: Sequence,
         first_index: u32,
         entries: Vec<Entry>,
-    ) -> Result<(), Status> {
+    ) -> Result<u32, Status> {
         let stream = self
             .streams
             .entry(stream_id)
@@ -215,7 +230,7 @@ impl Store {
             replica.broadcast();
         }
 
-        Ok(())
+        Ok(replica.continuously_persisted_index())
     }
 
     pub fn read(
@@ -310,8 +325,7 @@ impl storepb::segment_store_server::SegmentStore for Server {
     ) -> Result<Response<storepb::WriteResponse>, Status> {
         let req = input.into_inner();
         let mut store = self.store.lock().await;
-        let persisted_seq = (req.first_index as usize + req.entries.len()) as u64 - 1;
-        store.write(
+        let persisted_index = store.write(
             req.stream_id,
             req.seg_epoch,
             req.epoch,
@@ -320,8 +334,7 @@ impl storepb::segment_store_server::SegmentStore for Server {
             req.entries.into_iter().map(Into::into).collect(),
         )?;
 
-        // TODO(w41ter) ensure previous sequences is acked.
-        Ok(Response::new(storepb::WriteResponse { persisted_seq }))
+        Ok(Response::new(storepb::WriteResponse { persisted_index }))
     }
 
     async fn read(

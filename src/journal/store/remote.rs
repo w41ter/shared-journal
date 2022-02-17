@@ -447,4 +447,44 @@ mod tests {
         assert!(got.iter().zip(read_expect.iter()).all(|(l, r)| l == r));
         Ok(())
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_returns_continuously_persisted_index() -> crate::Result<()> {
+        let local_addr = build_seg_store().await?;
+        let client = Client::connect(&local_addr.to_string()).await?;
+        let write_req = storepb::WriteRequest {
+            stream_id: 1,
+            seg_epoch: 1,
+            epoch: 1,
+            acked_seq: 0,
+            first_index: 1,
+            entries: vec![entry(vec![1u8]), entry(vec![2u8]), entry(vec![3u8])],
+        };
+        let resp = client.write(write_req).await?;
+        assert_eq!(resp.persisted_index, 3);
+
+        let write_req = storepb::WriteRequest {
+            stream_id: 1,
+            seg_epoch: 1,
+            epoch: 1,
+            acked_seq: 0,
+            first_index: 5,
+            entries: vec![entry(vec![5u8])],
+        };
+        let resp = client.write(write_req).await?;
+        assert_eq!(resp.persisted_index, 3);
+
+        let write_req = storepb::WriteRequest {
+            stream_id: 1,
+            seg_epoch: 1,
+            epoch: 1,
+            acked_seq: 0,
+            first_index: 4,
+            entries: vec![entry(vec![4u8])],
+        };
+        let resp = client.write(write_req).await?;
+        assert_eq!(resp.persisted_index, 5);
+
+        Ok(())
+    }
 }

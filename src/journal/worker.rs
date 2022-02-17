@@ -276,9 +276,7 @@ fn flush_messages(
             runtime.spawn(async move {
                 let epoch = write.epoch;
                 match writer.write(write).await {
-                    Ok(persisted_seq) => {
-                        // TODO(w41ter) validate persisted seq.
-                        let index = persisted_seq.index;
+                    Ok(index) => {
                         let msg = Message {
                             target,
                             seg_epoch,
