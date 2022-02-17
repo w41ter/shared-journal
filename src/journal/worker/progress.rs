@@ -15,74 +15,128 @@
 use std::{collections::VecDeque, ops::Range};
 
 /// A mixin structure holds the fields used in congestion stage.
-#[allow(dead_code)]
+#[derive(Default)]
 struct CongestMixin {
-    window_size: usize,
+    /// The latest tick retransmit entries.
+    tick: usize,
 
-    lost_bytes: usize,
+    /// The number of bytes send to the target but invalid due to timeout.
+    invalid_bytes: usize,
+
+    /// The number of bytes send to the target during the congestion.
     recoup_bytes: usize,
-
-    latest_tick: usize,
 
     retransmit_ranges: VecDeque<(Range<u32>, usize)>,
 }
 
+impl CongestMixin {
+    /// Handle received events, and return whether the congestion is finished.
+    fn on_received(&mut self, received_bytes: usize) -> bool {
+        self.recoup_bytes += received_bytes;
+        self.recoup_bytes >= self.invalid_bytes * 20
+    }
+
+    fn on_timeout(&mut self, range: Range<u32>, bytes: usize) {
+        self.invalid_bytes += bytes;
+        self.retransmit_ranges.insert(
+            self.retransmit_ranges
+                .binary_search_by_key(&range.start, |(r, _)| r.start)
+                .err()
+                .expect("this range shouldn't exists in the `retransmit_ranges`"),
+            (range, bytes),
+        );
+    }
+
+    fn might_replicate(&mut self, next_index: u32, replicate_bytes: usize) -> bool {
+        if let Some((Range { start, end }, bytes)) = self.retransmit_ranges.pop_front() {
+            // There still exists some pending entries.
+            debug_assert!(start < next_index, "Progress::next_chunk()");
+            debug_assert!(next_index <= end, "Progress::next_chunk()");
+            if next_index < end {
+                self.retransmit_ranges
+                    .push_front((next_index..end, bytes.saturating_sub(replicate_bytes)));
+            }
+            return true;
+        }
+        false
+    }
+}
+
 #[allow(dead_code)]
 struct SlidingWindow {
-    acked_bytes: usize,
+    /// The number of bytes which already known the response. Includes timeout
+    /// and received entries.
+    resp_bytes: usize,
+    /// The number of bytes already send to target.
     send_bytes: usize,
+    /// The capacity bytes of sliding window.
     capacity: usize,
+    /// The capacity bytes of sliding window, its the initial size.
+    actual_capacity: usize,
 
-    start: usize,
-    size: usize,
-    window: Vec<(u32, usize)>,
+    window: VecDeque<(u32, usize)>,
 }
 
 impl SlidingWindow {
-    const KB: usize = 1024;
-    const MB: usize = 1024 * Self::KB;
-    const MIN_WINDOW: usize = 128;
-
     fn new(capacity: usize) -> Self {
-        let window = Self::MIN_WINDOW.max(capacity / Self::MB);
         SlidingWindow {
-            acked_bytes: 0,
+            resp_bytes: 0,
             send_bytes: 0,
             capacity,
+            actual_capacity: capacity,
 
-            start: 0,
-            size: 0,
-            window: vec![(0, 0); window],
+            window: VecDeque::new(),
         }
     }
 
     /// Returns the available space for the sliding window.
-    #[allow(dead_code)]
     fn available(&self) -> usize {
-        if self.window.len() == self.size {
-            0
-        } else {
-            let consumed = self.send_bytes.saturating_sub(self.acked_bytes);
-            self.capacity.saturating_sub(consumed)
-        }
+        let consumed = self.send_bytes.saturating_sub(self.resp_bytes);
+        self.capacity.saturating_sub(consumed)
     }
 
     /// Allocate space and record relevant data.
     fn replicate(&mut self, next_index: u32, bytes: usize) {
-        debug_assert!(self.size < self.window.len());
-
-        let off = (self.start + self.size) % self.window.len();
-        self.window[off] = (next_index, bytes);
-        self.size += 1;
+        self.window.push_back((next_index, bytes));
         self.send_bytes += bytes;
     }
 
-    fn release(&mut self, received_index: u32) {
-        while self.size > 0 && self.window[self.start].0 <= received_index {
-            self.acked_bytes += self.window[self.start].1;
-            self.start = (self.start + 1) % self.window.len();
-            self.size -= 1;
+    /// Release all matched indexes and return the consumed bytes.
+    fn release(&mut self, matched_index: u32) -> usize {
+        let consumed_bytes = self
+            .window
+            .drain(..self.upper_bound(matched_index))
+            .map(|(_, b)| b)
+            .sum::<usize>();
+        self.resp_bytes += consumed_bytes;
+        consumed_bytes
+    }
+
+    /// Freeze available space.
+    fn freeze(&mut self) {
+        self.capacity = self.send_bytes.saturating_sub(self.resp_bytes);
+    }
+
+    fn melt(&mut self) {
+        self.capacity = self.actual_capacity;
+    }
+
+    /// Like replicate but don't record indexes.
+    fn shrink(&mut self, bytes: usize) {
+        self.send_bytes += bytes;
+    }
+
+    fn extend(&mut self, bytes: usize) {
+        self.resp_bytes += bytes;
+    }
+
+    fn upper_bound(&self, target: u32) -> usize {
+        for (i, (index, _)) in self.window.iter().enumerate() {
+            if *index > target {
+                return i;
+            }
         }
+        self.window.len()
     }
 }
 
@@ -92,79 +146,189 @@ impl SlidingWindow {
 pub(in crate::journal) struct Progress {
     epoch: u32,
 
-    // The default value is zero, so any proposal's index should greater than zero.
+    /// The term matched means that all previous entries have been persisted.
+    ///
+    /// The default value is zero, so any proposal's index should greater than
+    /// zero.
     pub matched_index: u32,
+    acked_index: u32,
     next_index: u32,
-
-    start: usize,
-    size: usize,
-    in_flights: Vec<u32>,
 
     sliding_window: SlidingWindow,
 
+    /// Records congestion and retransmission data structures.  The link is
+    /// normally if it is `None`.
     congest: Option<Box<CongestMixin>>,
 }
 
 impl Progress {
-    const WINDOW: usize = 128;
-
     pub fn new(epoch: u32) -> Self {
         Progress {
             epoch,
             matched_index: 0,
+            acked_index: 0,
             next_index: 1,
-            start: 0,
-            size: 0,
-            in_flights: vec![0; Self::WINDOW],
 
-            sliding_window: SlidingWindow::new(1024),
+            // TODO(w41ter) config sliding window
+            sliding_window: SlidingWindow::new(1024 * 1024 * 64),
             congest: None,
         }
     }
 
     /// Return which chunk needs to replicate to the target.
-    pub fn next_chunk(&self, next_index: u32) -> (u32, u32) {
-        if self.size == Self::WINDOW {
-            (self.next_index, self.next_index)
+    pub fn next_chunk(&mut self, next_index: u32, latest_tick: usize) -> (Range<u32>, usize) {
+        let avail = self.sliding_window.available();
+        if let Some(congest) = &mut self.congest {
+            if let Some((range, bytes)) = congest.retransmit_ranges.front() {
+                // Since timeout also advance `resp_bytes`, the avail bandwidth should great
+                // than the required. See `Progress::on_timeout` for details.
+                //
+                // Sometimes the bandwidth is always insufficient (for example, all messages
+                // have timed out), in order to avoid replication interruption, each tick tries
+                // to send some data.
+                if *bytes < avail || congest.tick < latest_tick {
+                    // TODO(w41ter) combine tiny continuously ranges.
+                    congest.tick = latest_tick;
+                    return (range.clone(), avail.max(*bytes));
+                } else {
+                    return (self.next_index..self.next_index, 0);
+                }
+            }
+        }
+
+        if avail == 0 {
+            (self.next_index..self.next_index, 0)
         } else if next_index > self.next_index {
-            (self.next_index, next_index)
+            (self.next_index..next_index, avail)
         } else {
-            (next_index, next_index)
+            (next_index..next_index, avail)
         }
     }
 
-    pub fn replicate(&mut self, next_index: u32) {
-        debug_assert!(
-            self.next_index <= next_index,
-            "local next_index {}, but receive {}",
-            self.next_index,
-            next_index
-        );
-        self.next_index = next_index;
-        self.sliding_window.replicate(next_index, 0);
+    pub fn replicate(&mut self, next_index: u32, replicate_bytes: usize) {
+        if self
+            .congest
+            .as_mut()
+            .map(|c| c.might_replicate(next_index, replicate_bytes))
+            .unwrap_or_default()
+        {
+            self.sliding_window.shrink(replicate_bytes)
+        } else {
+            debug_assert!(
+                self.next_index <= next_index,
+                "local next_index {}, but receive {}",
+                self.next_index,
+                next_index
+            );
+
+            self.next_index = next_index;
+            self.sliding_window.replicate(next_index, replicate_bytes);
+        }
     }
 
-    /// A server has stored entries.
-    pub fn on_received(&mut self, epoch: u32, index: u32) -> bool {
-        if self.epoch != epoch {
-            // Staled received request.
-            false
-        } else {
-            self.sliding_window.release(index);
-            self.matched_index = index;
-            self.next_index = index + 1;
-            self.size < Self::WINDOW
+    /// The target has received and persisted entries.
+    pub fn on_received(&mut self, matched_index: u32, acked_index: u32) {
+        if self.acked_index < acked_index {
+            self.acked_index = acked_index;
+        }
+        if self.matched_index < matched_index {
+            let consumed_bytes = self.sliding_window.release(matched_index);
+            self.matched_index = matched_index;
+
+            if let Some(congest) = &mut self.congest {
+                if congest.on_received(consumed_bytes) {
+                    self.congest = None;
+                    self.sliding_window.melt();
+                }
+            }
         }
     }
 
     #[allow(dead_code, unused)]
-    pub fn on_timeout(&mut self, range: std::ops::Range<u32>) -> bool {
-        false
+    pub fn on_timeout(&mut self, range: std::ops::Range<u32>, bytes: usize) {
+        if self.congest.is_none() {
+            self.sliding_window.freeze();
+            self.congest = Some(Box::new(CongestMixin::default()));
+        }
+
+        // NOTE: the sliding window now becomes available, so the retransmission
+        // requires more available space.
+        self.sliding_window.extend(bytes);
+        self.congest.as_mut().unwrap().on_timeout(range, bytes);
     }
 
     /// Return whether a target has been matched to the corresponding index.
     #[allow(dead_code, unused)]
+    #[inline(always)]
     pub fn is_matched(&self, index: u32) -> bool {
-        false
+        self.matched_index >= index
+    }
+
+    /// Return whether a target has been acked the corresponding index.
+    #[allow(dead_code, unused)]
+    #[inline(always)]
+    pub fn is_acked(&self, index: u32) -> bool {
+        self.acked_index >= index
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retransmit() {
+        let mut progress = Progress::new(1);
+        progress.replicate(100, 1024);
+        progress.replicate(200, 1024);
+        progress.replicate(300, 1024);
+        progress.replicate(400, 1024);
+        progress.replicate(500, 1024);
+
+        // Now its timeout and lost entries in [300, 400).
+        progress.on_timeout(300..400, 1024);
+
+        // 1. Only available after receive another entry.
+        // not available
+        let (Range { start, end }, bytes) = progress.next_chunk(600, 0);
+        assert_eq!(start, end);
+        assert_eq!(start, 500);
+        assert_eq!(bytes, 0);
+
+        // 2. retransmit first.
+        progress.on_received(100, 0);
+        let (Range { start, end }, bytes) = progress.next_chunk(600, 0);
+        assert_eq!(start, 300);
+        assert_eq!(end, 400);
+        progress.replicate(end, bytes);
+
+        // not available
+        let (Range { start, end }, bytes) = progress.next_chunk(600, 0);
+        assert_eq!(start, end);
+        assert_eq!(start, 500);
+        assert_eq!(bytes, 0);
+
+        // 3. try replicate normal entries.
+        progress.on_received(200, 0);
+        let (Range { start, end }, _) = progress.next_chunk(600, 0);
+        assert_eq!(start, 500);
+        assert_eq!(end, 600);
+    }
+
+    #[test]
+    fn deadlock_but_advance_by_tick() {
+        let mut progress = Progress::new(1);
+        progress.replicate(100, 1024);
+        progress.on_timeout(1..100, 1024);
+
+        // not available
+        let (Range { start, end }, bytes) = progress.next_chunk(600, 0);
+        assert_eq!(start, end);
+        assert_eq!(start, 100);
+        assert_eq!(bytes, 0);
+
+        let (Range { start, end }, _) = progress.next_chunk(600, 1);
+        assert_eq!(start, 1);
+        assert_eq!(end, 100);
     }
 }

@@ -510,6 +510,7 @@ impl Worker {
                         }
                     },
                     Command::Tick => {
+                        state_machine.tick();
                         send_heartbeat(
                             &self.runtime_handle,
                             &self.master,

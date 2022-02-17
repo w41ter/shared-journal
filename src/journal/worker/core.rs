@@ -72,6 +72,7 @@ pub(super) struct StreamStateMachine {
 
     pub acked_seq: Sequence,
 
+    latest_tick: usize,
     mem_store: MemStore,
     copy_set: HashMap<String, Progress>,
 
@@ -91,6 +92,7 @@ impl StreamStateMachine {
             role: Role::Follower,
             leader: "".to_owned(),
             state: ObserverState::Following,
+            latest_tick: 0,
             mem_store: MemStore::new(INITIAL_EPOCH),
             copy_set: HashMap::new(),
             replicate_policy: ReplicatePolicy::Simple,
@@ -111,6 +113,10 @@ impl StreamStateMachine {
                 Some(self.leader.clone())
             },
         }
+    }
+
+    pub fn tick(&mut self) {
+        self.latest_tick += 1;
     }
 
     pub fn promote(
@@ -160,7 +166,7 @@ impl StreamStateMachine {
         match msg.detail {
             MsgDetail::Received { index } => {
                 if self.role == Role::Leader && msg.epoch == self.epoch {
-                    self.handle_received(msg.target, msg.epoch, index);
+                    self.handle_received(msg.target, index);
                 } else {
                     warn!(
                         "stream {} epoch {} ignore staled received, index: {}, epoch {}",
@@ -230,6 +236,7 @@ impl StreamStateMachine {
                 &mut self.ready,
                 progress,
                 &self.mem_store,
+                self.latest_tick,
                 self.epoch,
                 self.acked_seq,
                 server_id,
@@ -238,22 +245,26 @@ impl StreamStateMachine {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn replicate(
         ready: &mut Ready,
         progress: &mut Progress,
         mem_store: &MemStore,
+        latest_tick: usize,
         epoch: u32,
         acked_seq: Sequence,
         server_id: &str,
         bcast_acked_seq: bool,
     ) {
+        use std::ops::Range;
+
         let next_index = mem_store.next_index();
-        let (start, end) = progress.next_chunk(next_index);
+        let (Range { start, end }, _bytes) = progress.next_chunk(next_index, latest_tick);
         let detail = match mem_store.range(start..end) {
             Some(entries) => {
                 // Do not forward acked sequence to unmatched index.
                 let matched_acked_seq = Sequence::min(acked_seq, Sequence::new(epoch, end - 1));
-                progress.replicate(end);
+                progress.replicate(end, 0);
                 MsgDetail::Store {
                     entries,
                     acked_seq: matched_acked_seq,
@@ -285,20 +296,10 @@ impl StreamStateMachine {
         }
     }
 
-    fn handle_received(&mut self, target: String, epoch: u32, index: u32) {
+    fn handle_received(&mut self, target: String, index: u32) {
         debug_assert_eq!(self.role, Role::Leader);
         if let Some(progress) = self.copy_set.get_mut(&target) {
-            if progress.on_received(epoch, index) {
-                Self::replicate(
-                    &mut self.ready,
-                    progress,
-                    &self.mem_store,
-                    self.epoch,
-                    self.acked_seq,
-                    &target,
-                    true,
-                );
-            }
+            progress.on_received(index, 0);
         }
     }
 
