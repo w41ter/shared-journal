@@ -58,7 +58,8 @@ message WriteRequest {
 }
 
 message WriteResponse {
-    uint64 persisted_seq = 1;
+    // The store only returns continouesly index.
+    uint32 persisted_index = 1;
 }
 
 message ReadRequest {
