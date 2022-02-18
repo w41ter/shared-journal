@@ -28,6 +28,7 @@ use std::{
 };
 
 use futures::channel::oneshot;
+use log::warn;
 use tokio::{runtime::Handle as RuntimeHandle, sync::mpsc::UnboundedSender};
 
 pub(super) use self::progress::Progress;
@@ -260,24 +261,27 @@ fn flush_write_requests(
             let target = write.target;
             let write_req = WriteRequest {
                 epoch: write.epoch,
-                index: write.first_index,
+                index: write.range.start,
                 acked: write.acked_seq,
                 entries: write.entries,
             };
-            match writer.write(write_req).await {
-                Ok(index) => {
-                    let msg = Message {
-                        target,
-                        seg_epoch,
-                        epoch: write.epoch,
-                        detail: MsgDetail::Received { index },
-                    };
-                    cloned_channel.submit(Command::Msg(msg));
-                }
+            let detail = match writer.write(write_req).await {
+                Ok(index) => MsgDetail::Received { index },
                 Err(err) => {
-                    println!("send write request to {}: {:?}", target, err);
+                    warn!("replicate entries to {}: {:?}", target, err);
+                    MsgDetail::Timeout {
+                        range: write.range,
+                        bytes: write.bytes,
+                    }
                 }
-            }
+            };
+            let msg = Message {
+                target,
+                seg_epoch,
+                epoch: write.epoch,
+                detail,
+            };
+            cloned_channel.submit(Command::Msg(msg));
         });
     }
 }

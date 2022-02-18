@@ -259,7 +259,7 @@ mod tests {
     fn receive_writes(sm: &mut StreamStateMachine, writes: &Vec<Write>) {
         for write in writes {
             if !write.entries.is_empty() {
-                let index = write.first_index + write.entries.len() as u32 - 1;
+                let index = write.range.start + write.entries.len() as u32 - 1;
                 sm.step(Message {
                     target: write.target.clone(),
                     seg_epoch: write.epoch,

@@ -27,7 +27,8 @@ pub(crate) struct Write {
     pub seg_epoch: u32,
     pub epoch: u32,
     pub acked_seq: Sequence,
-    pub first_index: u32,
+    pub range: Range<u32>,
+    pub bytes: usize,
     #[derivative(Debug = "ignore")]
     pub entries: Vec<Entry>,
 }
@@ -290,7 +291,7 @@ impl StreamStateMachine {
         bcast_acked_seq: bool,
     ) {
         let next_index = mem_store.next_index();
-        let (Range { start, end }, _bytes) = progress.next_chunk(next_index, latest_tick);
+        let (Range { start, mut end }, _bytes) = progress.next_chunk(next_index, latest_tick);
         let (acked_seq, entries) = match mem_store.range(start..end) {
             Some(entries) => {
                 // Do not forward acked sequence to unmatched index.
@@ -306,11 +307,14 @@ impl StreamStateMachine {
             None => return,
         };
 
+        // TODO(w41ter) set bytes.
+        end = start + entries.len() as u32;
         let write = Write {
             target: server_id.to_owned(),
             seg_epoch: epoch,
             epoch,
-            first_index: start,
+            range: start..end,
+            bytes: 0,
             acked_seq,
             entries,
         };
