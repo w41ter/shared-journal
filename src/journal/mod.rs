@@ -54,6 +54,19 @@ pub enum Role {
     Follower,
 }
 
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Role::Leader => "LEADER",
+                Role::Follower => "FOLLOWER",
+            }
+        )
+    }
+}
+
 /// The role and leader's address of current epoch.
 #[derive(Debug, Clone)]
 pub struct EpochState {

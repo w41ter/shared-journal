@@ -67,10 +67,6 @@ pub(crate) enum Command {
         #[derivative(Debug = "ignore")]
         sender: oneshot::Sender<EpochState>,
     },
-    Recovered {
-        seg_epoch: u32,
-        writer_epoch: u32,
-    },
 }
 
 struct ChannelState {
@@ -246,51 +242,43 @@ impl WriterGroup {
     }
 }
 
-fn flush_messages(
+fn flush_write_requests(
     runtime: &RuntimeHandle,
     channel: Channel,
     writer_group: &WriterGroup,
-    pending_messages: Vec<Message>,
+    pending_writes: Vec<core::Write>,
 ) {
-    for msg in pending_messages {
-        if let MsgDetail::Store {
-            acked_seq,
-            first_index,
-            entries,
-        } = msg.detail
-        {
-            let mut writer = writer_group
-                .writers
-                .get(&msg.target)
-                .expect("target not exists in copy group")
-                .clone();
-            let seg_epoch = writer_group.epoch();
-            let target = msg.target;
-            let write = WriteRequest {
-                epoch: msg.epoch,
-                index: first_index,
-                acked: acked_seq,
-                entries,
+    for write in pending_writes {
+        let mut writer = writer_group
+            .writers
+            .get(&write.target)
+            .expect("target not exists in copy group")
+            .clone();
+        let seg_epoch = writer_group.epoch();
+        let cloned_channel = channel.clone();
+        runtime.spawn(async move {
+            let target = write.target;
+            let write_req = WriteRequest {
+                epoch: write.epoch,
+                index: write.first_index,
+                acked: write.acked_seq,
+                entries: write.entries,
             };
-            let cloned_channel = channel.clone();
-            runtime.spawn(async move {
-                let epoch = write.epoch;
-                match writer.write(write).await {
-                    Ok(index) => {
-                        let msg = Message {
-                            target,
-                            seg_epoch,
-                            epoch,
-                            detail: MsgDetail::Received { index },
-                        };
-                        cloned_channel.submit(Command::Msg(msg));
-                    }
-                    Err(err) => {
-                        println!("send write request to {}: {:?}", target, err);
-                    }
+            match writer.write(write_req).await {
+                Ok(index) => {
+                    let msg = Message {
+                        target,
+                        seg_epoch,
+                        epoch: write.epoch,
+                        detail: MsgDetail::Received { index },
+                    };
+                    cloned_channel.submit(Command::Msg(msg));
                 }
-            });
-        }
+                Err(err) => {
+                    println!("send write request to {}: {:?}", target, err);
+                }
+            }
+        });
     }
 }
 
@@ -541,12 +529,6 @@ impl Worker {
                     Command::EpochState { sender } => {
                         sender.send(state_machine.epoch_state()).unwrap_or_default();
                     }
-                    Command::Recovered {
-                        seg_epoch,
-                        writer_epoch,
-                    } => {
-                        state_machine.handle_recovered(seg_epoch, writer_epoch);
-                    }
                 }
             }
 
@@ -555,11 +537,11 @@ impl Worker {
                     .writer_groups
                     .get(&(channel.stream_id(), state_machine.epoch))
                     .expect("writer group should exists");
-                flush_messages(
+                flush_write_requests(
                     &self.runtime_handle,
                     channel.clone(),
                     writer_group,
-                    ready.pending_messages,
+                    ready.pending_writes,
                 );
                 applier.might_advance(ready.acked_seq);
                 if let Some(pending_epoch) = ready.pending_epoch {

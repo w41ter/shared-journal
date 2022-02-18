@@ -12,26 +12,46 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Display, ops::Range};
 
 use bitflags::bitflags;
-use log::{info, warn};
+use log::{error, info, warn};
 
 use super::{EpochState, MemStore, Progress, ReplicatePolicy};
 use crate::{journal::master::ObserverState, Entry, Error, Result, Role, Sequence, INITIAL_EPOCH};
 
 #[derive(Derivative, Clone)]
 #[derivative(Debug)]
+pub(crate) struct Write {
+    pub target: String,
+    pub seg_epoch: u32,
+    pub epoch: u32,
+    pub acked_seq: Sequence,
+    pub first_index: u32,
+    #[derivative(Debug = "ignore")]
+    pub entries: Vec<Entry>,
+}
+
+#[derive(Derivative, Clone)]
+#[derivative(Debug)]
+#[allow(unused)]
 pub(crate) enum MsgDetail {
-    /// Store entries to.
-    Store {
-        acked_seq: Sequence,
-        first_index: u32,
-        #[derivative(Debug = "ignore")]
-        entries: Vec<Entry>,
-    },
-    /// The journal server have received store request.
     Received { index: u32 },
+    Recovered,
+    Rejected,
+    Timeout { range: Range<u32>, bytes: usize },
+}
+
+impl Display for MsgDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let desc = match self {
+            MsgDetail::Received { .. } => "RECEIVED",
+            MsgDetail::Recovered => "RECOVERED",
+            MsgDetail::Rejected => "REJECTED",
+            MsgDetail::Timeout { .. } => "TIMEOUT",
+        };
+        write!(f, "{}", desc)
+    }
 }
 
 /// An abstraction of data communication between `StreamStateMachine` and
@@ -39,7 +59,6 @@ pub(crate) enum MsgDetail {
 #[derive(Debug, Clone)]
 pub(crate) struct Message {
     pub target: String,
-    #[allow(dead_code)]
     pub seg_epoch: u32,
     pub epoch: u32,
     pub detail: MsgDetail,
@@ -51,7 +70,7 @@ pub(super) struct Ready {
     pub acked_seq: Sequence,
 
     pub pending_epoch: Option<u32>,
-    pub pending_messages: Vec<Message>,
+    pub pending_writes: Vec<Write>,
 }
 
 bitflags! {
@@ -81,6 +100,12 @@ pub(super) struct StreamStateMachine {
     flags: Flags,
 
     pending_epochs: Vec<u32>,
+}
+
+impl Display for StreamStateMachine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "stream {} epoch {}", self.stream_id, self.epoch)
+    }
 }
 
 impl StreamStateMachine {
@@ -163,22 +188,30 @@ impl StreamStateMachine {
     }
 
     pub fn step(&mut self, msg: Message) {
-        match msg.detail {
-            MsgDetail::Received { index } => {
-                if self.role == Role::Leader && msg.epoch == self.epoch {
-                    self.handle_received(msg.target, index);
-                } else {
-                    warn!(
-                        "stream {} epoch {} ignore staled received, index: {}, epoch {}",
-                        self.stream_id, self.epoch, index, msg.epoch
-                    );
-                }
+        use std::cmp::Ordering;
+        match msg.epoch.cmp(&self.epoch) {
+            Ordering::Less => {
+                warn!(
+                    "{} ignore staled msg {} from {}, epoch {}",
+                    self, msg.detail, msg.target, msg.epoch
+                );
+                return;
             }
-            MsgDetail::Store {
-                first_index: _,
-                acked_seq: _,
-                entries: _,
-            } => unreachable!(),
+            Ordering::Greater => {
+                todo!("should promote itself epoch");
+            }
+            Ordering::Equal if self.role != Role::Leader => {
+                error!("{} role {} receive {}", self, self.role, msg.detail);
+                return;
+            }
+            _ => {}
+        }
+
+        match msg.detail {
+            MsgDetail::Received { index } => self.handle_received(msg.target, index),
+            MsgDetail::Recovered => self.handle_recovered(msg.seg_epoch),
+            MsgDetail::Timeout { range, bytes } => self.handle_timeout(msg.target, range, bytes),
+            MsgDetail::Rejected => {}
         }
     }
 
@@ -256,41 +289,33 @@ impl StreamStateMachine {
         server_id: &str,
         bcast_acked_seq: bool,
     ) {
-        use std::ops::Range;
-
         let next_index = mem_store.next_index();
         let (Range { start, end }, _bytes) = progress.next_chunk(next_index, latest_tick);
-        let detail = match mem_store.range(start..end) {
+        let (acked_seq, entries) = match mem_store.range(start..end) {
             Some(entries) => {
                 // Do not forward acked sequence to unmatched index.
                 let matched_acked_seq = Sequence::min(acked_seq, Sequence::new(epoch, end - 1));
                 progress.replicate(end, 0);
-                MsgDetail::Store {
-                    entries,
-                    acked_seq: matched_acked_seq,
-                    first_index: start,
-                }
+                (matched_acked_seq, entries)
             }
             None if bcast_acked_seq => {
                 // All entries are replicated, might broadcast acked
                 // sequence.
-                MsgDetail::Store {
-                    entries: vec![],
-                    acked_seq,
-                    first_index: start,
-                }
+                (acked_seq, vec![])
             }
             None => return,
         };
 
-        let msg = Message {
+        let write = Write {
             target: server_id.to_owned(),
             seg_epoch: epoch,
             epoch,
-            detail,
+            first_index: start,
+            acked_seq,
+            entries,
         };
 
-        ready.pending_messages.push(msg);
+        ready.pending_writes.push(write);
         if end < next_index {
             ready.still_active = true;
         }
@@ -303,18 +328,13 @@ impl StreamStateMachine {
         }
     }
 
-    pub fn handle_recovered(&mut self, seg_epoch: u32, writer_epoch: u32) {
-        if writer_epoch != self.epoch {
-            warn!(
-                "stream {} epoch {} receive staled recovered msg, seg epoch: {}, writer epoch: {}",
-                self.stream_id, self.epoch, seg_epoch, writer_epoch
-            );
-            return;
-        }
-
+    pub fn handle_recovered(&mut self, seg_epoch: u32) {
+        debug_assert_eq!(self.role, Role::Leader);
         info!(
-            "stream {} epoch {} receive recovered msg, seg epoch: {}, writer epoch: {}",
-            self.stream_id, self.epoch, seg_epoch, writer_epoch
+            "{} receive {}, seg epoch: {}",
+            self,
+            MsgDetail::Recovered,
+            seg_epoch
         );
 
         match self.pending_epochs.pop() {
@@ -322,6 +342,14 @@ impl StreamStateMachine {
                 self.ready.pending_epoch = self.pending_epochs.last().cloned();
             }
             _ => panic!("should't happen"),
+        }
+    }
+
+    pub fn handle_timeout(&mut self, target: String, range: Range<u32>, bytes: usize) {
+        debug_assert_eq!(self.role, Role::Leader);
+
+        if let Some(progress) = self.copy_set.get_mut(&target) {
+            progress.on_timeout(range, bytes)
         }
     }
 }

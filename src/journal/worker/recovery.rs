@@ -20,7 +20,10 @@ use std::{
 
 use futures::{stream, StreamExt};
 
-use super::{Channel, Command, MemStore, ReplicatePolicy, WriterGroup};
+use super::{
+    core::{Message, MsgDetail},
+    Channel, Command, MemStore, ReplicatePolicy, WriterGroup,
+};
 use crate::{
     journal::{
         master::{remote::RemoteMaster, Master},
@@ -111,10 +114,13 @@ async fn recovery(mut ctx: RecoveryContext) -> Result<()> {
 
     ctx.master.seal_segment(ctx.segment_meta.stream_id).await?;
 
-    ctx.channel.submit(Command::Recovered {
+    let msg = Message {
+        target: "self".into(),
         seg_epoch: ctx.writer_group.epoch(),
-        writer_epoch: ctx.writer_epoch,
-    });
+        epoch: ctx.writer_epoch,
+        detail: MsgDetail::Recovered,
+    };
+    ctx.channel.submit(Command::Msg(msg));
     Ok(())
 }
 
@@ -237,9 +243,32 @@ fn seal(
 mod tests {
     use super::*;
     use crate::{
-        journal::worker::{Message, MsgDetail, StreamStateMachine},
+        journal::worker::{core::Write, Message, MsgDetail, StreamStateMachine},
         Role,
     };
+
+    fn handle_recovered(sm: &mut StreamStateMachine, seg_epoch: u32) {
+        sm.step(Message {
+            target: "self".into(),
+            seg_epoch,
+            epoch: sm.epoch,
+            detail: MsgDetail::Recovered,
+        });
+    }
+
+    fn receive_writes(sm: &mut StreamStateMachine, writes: &Vec<Write>) {
+        for write in writes {
+            if !write.entries.is_empty() {
+                let index = write.first_index + write.entries.len() as u32 - 1;
+                sm.step(Message {
+                    target: write.target.clone(),
+                    seg_epoch: write.epoch,
+                    epoch: write.epoch,
+                    detail: MsgDetail::Received { index },
+                });
+            }
+        }
+    }
 
     #[test]
     fn blocking_advance_until_all_previous_are_acked() {
@@ -256,24 +285,7 @@ mod tests {
         assert!(ready.is_some());
         assert!(ready.as_ref().unwrap().acked_seq <= Sequence::new(10, 0));
 
-        for msg in &ready.as_ref().unwrap().pending_messages {
-            if let MsgDetail::Store {
-                acked_seq: _,
-                first_index,
-                entries,
-            } = &msg.detail
-            {
-                if !entries.is_empty() {
-                    let index = first_index + entries.len() as u32 - 1;
-                    sm.step(Message {
-                        target: msg.target.clone(),
-                        seg_epoch: msg.epoch,
-                        epoch: msg.epoch,
-                        detail: MsgDetail::Received { index },
-                    });
-                }
-            }
-        }
+        receive_writes(&mut sm, &ready.as_ref().unwrap().pending_writes);
 
         // All entries are replicated.
         let ready = sm.collect();
@@ -281,7 +293,7 @@ mod tests {
         assert!(ready.as_ref().unwrap().acked_seq <= Sequence::new(10, 0));
 
         // All segment are recovered.
-        sm.handle_recovered(9, epoch);
+        handle_recovered(&mut sm, 9);
         let ready = sm.collect();
         assert!(ready.is_some());
         assert!(ready.as_ref().unwrap().acked_seq >= Sequence::new(10, 3));
@@ -302,10 +314,8 @@ mod tests {
         assert!(ready.is_some());
         assert!(ready.as_ref().unwrap().acked_seq <= Sequence::new(10, 0));
 
-        for msg in &ready.as_ref().unwrap().pending_messages {
-            if let MsgDetail::Store { .. } = &msg.detail {
-                panic!("Do not replicate entries if there exists two pending segments");
-            }
+        if !ready.as_ref().unwrap().pending_writes.is_empty() {
+            panic!("Do not replicate entries if there exists two pending segments");
         }
 
         // All entries are replicated.
@@ -314,32 +324,15 @@ mod tests {
         assert!(ready.as_ref().unwrap().acked_seq <= Sequence::new(10, 0));
 
         // A segment is recovered.
-        sm.handle_recovered(8, epoch);
+        handle_recovered(&mut sm, 8);
         let ready = sm.collect();
         assert!(ready.is_some());
         assert!(ready.as_ref().unwrap().acked_seq <= Sequence::new(10, 0));
 
-        for msg in &ready.as_ref().unwrap().pending_messages {
-            if let MsgDetail::Store {
-                acked_seq: _,
-                first_index,
-                entries,
-            } = &msg.detail
-            {
-                if !entries.is_empty() {
-                    let index = first_index + entries.len() as u32 - 1;
-                    sm.step(Message {
-                        target: msg.target.clone(),
-                        seg_epoch: msg.epoch,
-                        epoch: msg.epoch,
-                        detail: MsgDetail::Received { index },
-                    });
-                }
-            }
-        }
+        receive_writes(&mut sm, &ready.as_ref().unwrap().pending_writes);
 
         // All segment are recovered.
-        sm.handle_recovered(9, epoch);
+        handle_recovered(&mut sm, 9);
         let ready = sm.collect();
         assert!(ready.is_some());
         assert!(ready.as_ref().unwrap().acked_seq >= Sequence::new(10, 3));
