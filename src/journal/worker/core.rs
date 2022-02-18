@@ -291,30 +291,29 @@ impl StreamStateMachine {
         bcast_acked_seq: bool,
     ) {
         let next_index = mem_store.next_index();
-        let (Range { start, mut end }, _bytes) = progress.next_chunk(next_index, latest_tick);
-        let (acked_seq, entries) = match mem_store.range(start..end) {
-            Some(entries) => {
+        let (Range { start, mut end }, quota) = progress.next_chunk(next_index, latest_tick);
+        let (acked_seq, entries, bytes) = match mem_store.range(start..end, quota) {
+            Some((entries, bytes)) => {
                 // Do not forward acked sequence to unmatched index.
                 let matched_acked_seq = Sequence::min(acked_seq, Sequence::new(epoch, end - 1));
                 progress.replicate(end, 0);
-                (matched_acked_seq, entries)
+                (matched_acked_seq, entries, bytes)
             }
             None if bcast_acked_seq => {
                 // All entries are replicated, might broadcast acked
                 // sequence.
-                (acked_seq, vec![])
+                (acked_seq, vec![], 0)
             }
             None => return,
         };
 
-        // TODO(w41ter) set bytes.
         end = start + entries.len() as u32;
         let write = Write {
             target: server_id.to_owned(),
             seg_epoch: epoch,
             epoch,
             range: start..end,
-            bytes: 0,
+            bytes,
             acked_seq,
             entries,
         };

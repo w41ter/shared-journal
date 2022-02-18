@@ -14,6 +14,8 @@
 
 //! A stream storage implementations.
 
+#![feature(result_into_ok_or_err)]
+
 #[macro_use]
 extern crate derivative;
 
@@ -100,6 +102,14 @@ impl Entry {
             Entry::Event { epoch, event: _ } => *epoch = target,
             Entry::Bridge { epoch } => *epoch = target,
             _ => {}
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        if let Entry::Event { event, .. } = self {
+            core::mem::size_of::<Entry>() + event.len()
+        } else {
+            core::mem::size_of::<Entry>()
         }
     }
 }

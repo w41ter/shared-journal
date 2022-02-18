@@ -23,7 +23,9 @@ pub(super) struct MemStore {
     /// It should always greater than zero, see `journal::worker::Progress` for
     /// details.
     first_index: u32,
-    entries: VecDeque<Entry>,
+    base_bytes: usize,
+    total_bytes: usize,
+    entries: VecDeque<(Entry, usize)>,
 }
 
 impl MemStore {
@@ -31,6 +33,8 @@ impl MemStore {
         MemStore {
             epoch,
             first_index: 1,
+            base_bytes: 0,
+            total_bytes: 0,
             entries: VecDeque::new(),
         }
     }
@@ -43,17 +47,38 @@ impl MemStore {
     /// Save entry and assign index.
     pub fn append(&mut self, entry: Entry) -> Sequence {
         let next_index = self.next_index();
-        self.entries.push_back(entry);
+        self.total_bytes += entry.len();
+        self.entries.push_back((entry, self.total_bytes));
         Sequence::new(self.epoch, next_index)
     }
 
     /// Range values.
-    pub fn range(&self, r: std::ops::Range<u32>) -> Option<Vec<Entry>> {
+    pub fn range(&self, mut r: std::ops::Range<u32>, quota: usize) -> Option<(Vec<Entry>, usize)> {
+        let target_bytes = self.base_bytes + quota + 1;
+        let end = self.first_index
+            + self
+                .entries
+                .binary_search_by_key(&target_bytes, |(_, bytes)| *bytes)
+                .into_ok_or_err() as u32;
+        r.end = end.min(r.end);
+
         let next_index = self.next_index();
         if r.start < r.end && self.first_index <= r.start && r.end <= next_index {
             let start = (r.start - self.first_index) as usize;
             let end = (r.end - self.first_index) as usize;
-            Some(self.entries.range(start..end).cloned().collect())
+            let bytes = self
+                .entries
+                .range(start..end)
+                .map(|(_, b)| b)
+                .sum::<usize>()
+                .saturating_sub(self.base_bytes);
+            Some((
+                self.entries
+                    .range(start..end)
+                    .map(|(e, _)| e.clone())
+                    .collect(),
+                bytes,
+            ))
         } else {
             None
         }
@@ -65,7 +90,11 @@ impl MemStore {
         let next_index = self.next_index();
         if self.first_index < until && until < next_index {
             let offset = until - self.first_index;
-            self.entries.drain(..offset as usize);
+            self.base_bytes += self
+                .entries
+                .drain(..offset as usize)
+                .map(|(_, bytes)| bytes)
+                .sum::<usize>();
         }
     }
 }
@@ -88,6 +117,7 @@ mod tests {
 
     #[test]
     fn mem_storage_range() {
+        #[derive(Debug)]
         struct Test {
             entries: Vec<Entry>,
             range: std::ops::Range<u32>,
@@ -140,27 +170,28 @@ mod tests {
             Test {
                 entries: vec![ent(1), ent(2)],
                 range: 1..4,
-                expect: None,
+                expect: Some(vec![ent(1), ent(2)]),
             },
             Test {
                 entries: vec![ent(1), ent(2)],
                 range: 2..4,
-                expect: None,
+                expect: Some(vec![ent(2)]),
             },
         ];
 
         for test in tests {
+            println!("test {:?}", test);
             let mut mem_store = MemStore::new(1);
             for entry in test.entries {
                 mem_store.append(entry);
             }
-            let got = mem_store.range(test.range);
+            let got = mem_store.range(test.range, 40960);
             match test.expect {
                 Some(entries) => {
                     assert!(got.is_some());
                     assert!(entries
                         .into_iter()
-                        .zip(got.unwrap().into_iter())
+                        .zip(got.unwrap().0.into_iter())
                         .all(|(l, r)| l == r));
                 }
                 None => {
