@@ -65,12 +65,105 @@ pub(crate) struct Message {
     pub detail: MsgDetail,
 }
 
+pub(super) struct Replicate {
+    pub epoch: u32,
+
+    mem_store: MemStore,
+    copy_set: HashMap<String, Progress>,
+}
+
+impl Replicate {
+    pub fn new(epoch: u32, copy_set: Vec<String>) -> Self {
+        Replicate {
+            epoch,
+            mem_store: MemStore::new(epoch),
+            copy_set: copy_set
+                .into_iter()
+                .map(|c| (c, Progress::new(epoch)))
+                .collect(),
+        }
+    }
+
+    pub fn copy_set(&self) -> Vec<String> {
+        self.copy_set.keys().cloned().collect()
+    }
+
+    #[inline(always)]
+    pub fn append(&mut self, entry: Entry) {
+        self.mem_store.append(entry);
+    }
+
+    pub fn broadcast(
+        &mut self,
+        writer_epoch: u32,
+        latest_tick: usize,
+        acked_seq: Sequence,
+        acked_index_advanced: bool,
+        pending_writes: &mut Vec<Write>,
+    ) -> bool {
+        let mut active = false;
+        for (server_id, progress) in &mut self.copy_set {
+            let next_index = self.mem_store.next_index();
+            let (Range { start, mut end }, quota) = progress.next_chunk(next_index, latest_tick);
+            let (acked_seq, entries, bytes) = match self.mem_store.range(start..end, quota) {
+                Some((entries, bytes)) => {
+                    // Do not forward acked sequence to unmatched index.
+                    let matched_acked_seq =
+                        Sequence::min(acked_seq, Sequence::new(self.epoch, end - 1));
+                    progress.replicate(end, 0);
+                    (matched_acked_seq, entries, bytes)
+                }
+                // TODO(w41ter) support query indexes
+                None if acked_index_advanced => {
+                    // All entries are replicated, might broadcast acked
+                    // sequence.
+                    (acked_seq, vec![], 0)
+                }
+                None => continue,
+            };
+
+            end = start + entries.len() as u32;
+            let write = Write {
+                target: server_id.to_owned(),
+                seg_epoch: self.epoch,
+                epoch: writer_epoch,
+                range: start..end,
+                bytes,
+                acked_seq,
+                entries,
+            };
+            pending_writes.push(write);
+            if !active {
+                active = progress.is_acked(acked_seq.index);
+            }
+        }
+        false
+    }
+
+    pub fn handle_received(&mut self, target: String, index: u32) {
+        if let Some(progress) = self.copy_set.get_mut(&target) {
+            progress.on_received(index, 0);
+        }
+    }
+
+    pub fn handle_timeout(&mut self, target: String, range: Range<u32>, bytes: usize) {
+        if let Some(progress) = self.copy_set.get_mut(&target) {
+            progress.on_timeout(range, bytes)
+        }
+    }
+}
+
+pub(super) enum ToBeSealed {
+    Epoch(u32),
+    Rep(Box<Replicate>),
+}
+
 #[derive(Default)]
 pub(super) struct Ready {
     pub still_active: bool,
     pub acked_seq: Sequence,
 
-    pub pending_epoch: Option<u32>,
+    pub to_be_sealed: Option<ToBeSealed>,
     pub pending_writes: Vec<Write>,
 }
 
@@ -93,14 +186,13 @@ pub(super) struct StreamStateMachine {
     pub acked_seq: Sequence,
 
     latest_tick: usize,
-    mem_store: MemStore,
-    copy_set: HashMap<String, Progress>,
+
+    replicate: Box<Replicate>,
+    pending_epochs: Vec<u32>,
 
     ready: Ready,
 
     flags: Flags,
-
-    pending_epochs: Vec<u32>,
 }
 
 impl Display for StreamStateMachine {
@@ -119,10 +211,9 @@ impl StreamStateMachine {
             leader: "".to_owned(),
             state: ObserverState::Following,
             latest_tick: 0,
-            mem_store: MemStore::new(INITIAL_EPOCH),
-            copy_set: HashMap::new(),
             replicate_policy: ReplicatePolicy::Simple,
             acked_seq: Sequence::default(),
+            replicate: Box::new(Replicate::new(INITIAL_EPOCH, vec![])),
             ready: Ready::default(),
             flags: Flags::NONE,
             pending_epochs: Vec::default(),
@@ -162,23 +253,29 @@ impl StreamStateMachine {
         }
 
         let prev_epoch = std::mem::replace(&mut self.epoch, epoch);
+        let prev_role = self.role;
+        self.leader = leader;
+        self.role = role;
         self.state = match role {
             Role::Leader => ObserverState::Leading,
             Role::Follower => ObserverState::Following,
         };
-        self.leader = leader;
-        self.role = role;
-        self.mem_store = MemStore::new(epoch);
-        self.copy_set = copy_set
-            .into_iter()
-            .map(|remote| (remote, Progress::new(self.epoch)))
-            .collect();
-        self.pending_epochs = pending_epochs;
-
-        // Sort in reverse to ensure that the smallest is at the end. See
-        // `StreamStateMachine::handle_recovered` for details.
-        self.pending_epochs.sort_by(|a, b| b.cmp(a));
-        self.ready.pending_epoch = self.pending_epochs.last().cloned();
+        if self.role == Role::Leader {
+            self.pending_epochs = pending_epochs;
+            let new_replicate = Box::new(Replicate::new(self.epoch, copy_set));
+            if self.replicate.epoch + 1 == self.epoch && prev_role == self.role {
+                // do fast recovery
+                debug_assert_eq!(self.pending_epochs.len(), 1);
+                debug_assert_eq!(self.pending_epochs[0], prev_epoch);
+                let prev_replicate = std::mem::replace(&mut self.replicate, new_replicate);
+                self.ready.to_be_sealed = Some(ToBeSealed::Rep(prev_replicate));
+                self.pending_epochs = vec![prev_epoch];
+            } else {
+                // Sort in reverse to ensure that the smallest is at the end. See
+                // `StreamStateMachine::handle_recovered` for details.
+                self.pending_epochs.sort_by(|a, b| b.cmp(a));
+            }
+        }
 
         info!(
             "stream {} promote epoch from {} to {}, new role: {:?}, leader: {}",
@@ -224,7 +321,7 @@ impl StreamStateMachine {
                 epoch: self.epoch,
                 event,
             };
-            Ok(self.mem_store.append(entry))
+            Ok(self.replicate.mem_store.append(entry))
         }
     }
 
@@ -250,7 +347,7 @@ impl StreamStateMachine {
 
         let acked_seq = self
             .replicate_policy
-            .advance_acked_sequence(self.epoch, &self.copy_set);
+            .advance_acked_sequence(self.epoch, &self.replicate.copy_set);
         if self.acked_seq < acked_seq {
             self.acked_seq = acked_seq;
             self.flags |= Flags::ACK_ADVANCED;
@@ -265,73 +362,21 @@ impl StreamStateMachine {
             return;
         }
 
-        self.copy_set.iter_mut().for_each(|(server_id, progress)| {
-            Self::replicate(
-                &mut self.ready,
-                progress,
-                &self.mem_store,
-                self.latest_tick,
-                self.epoch,
-                self.acked_seq,
-                server_id,
-                self.flags.contains(Flags::ACK_ADVANCED),
-            );
-        });
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn replicate(
-        ready: &mut Ready,
-        progress: &mut Progress,
-        mem_store: &MemStore,
-        latest_tick: usize,
-        epoch: u32,
-        acked_seq: Sequence,
-        server_id: &str,
-        bcast_acked_seq: bool,
-    ) {
-        let next_index = mem_store.next_index();
-        let (Range { start, mut end }, quota) = progress.next_chunk(next_index, latest_tick);
-        let (acked_seq, entries, bytes) = match mem_store.range(start..end, quota) {
-            Some((entries, bytes)) => {
-                // Do not forward acked sequence to unmatched index.
-                let matched_acked_seq = Sequence::min(acked_seq, Sequence::new(epoch, end - 1));
-                progress.replicate(end, 0);
-                (matched_acked_seq, entries, bytes)
-            }
-            None if bcast_acked_seq => {
-                // All entries are replicated, might broadcast acked
-                // sequence.
-                (acked_seq, vec![], 0)
-            }
-            None => return,
-        };
-
-        end = start + entries.len() as u32;
-        let write = Write {
-            target: server_id.to_owned(),
-            seg_epoch: epoch,
-            epoch,
-            range: start..end,
-            bytes,
-            acked_seq,
-            entries,
-        };
-
-        ready.pending_writes.push(write);
-        if end < next_index {
-            ready.still_active = true;
-        }
+        self.replicate.broadcast(
+            self.epoch,
+            self.latest_tick,
+            self.acked_seq,
+            self.flags.contains(Flags::ACK_ADVANCED),
+            &mut self.ready.pending_writes,
+        );
     }
 
     fn handle_received(&mut self, target: String, index: u32) {
         debug_assert_eq!(self.role, Role::Leader);
-        if let Some(progress) = self.copy_set.get_mut(&target) {
-            progress.on_received(index, 0);
-        }
+        self.replicate.handle_received(target, index);
     }
 
-    pub fn handle_recovered(&mut self, seg_epoch: u32) {
+    fn handle_recovered(&mut self, seg_epoch: u32) {
         debug_assert_eq!(self.role, Role::Leader);
         info!(
             "{} receive {}, seg epoch: {}",
@@ -341,19 +386,16 @@ impl StreamStateMachine {
         );
 
         match self.pending_epochs.pop() {
-            Some(first_pending_epoch) if first_pending_epoch == seg_epoch => {
-                self.ready.pending_epoch = self.pending_epochs.last().cloned();
+            Some(pending_epoch) if pending_epoch == seg_epoch => {
+                self.ready.to_be_sealed = self.pending_epochs.last().map(|e| ToBeSealed::Epoch(*e));
             }
             _ => panic!("should't happen"),
         }
     }
 
-    pub fn handle_timeout(&mut self, target: String, range: Range<u32>, bytes: usize) {
+    fn handle_timeout(&mut self, target: String, range: Range<u32>, bytes: usize) {
         debug_assert_eq!(self.role, Role::Leader);
-
-        if let Some(progress) = self.copy_set.get_mut(&target) {
-            progress.on_timeout(range, bytes)
-        }
+        self.replicate.handle_timeout(target, range, bytes);
     }
 }
 
