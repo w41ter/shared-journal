@@ -548,12 +548,12 @@ impl Worker {
                     ready.pending_writes,
                 );
                 applier.might_advance(ready.acked_seq);
-                if let Some(pending_epoch) = ready.pending_epoch {
+                if let Some(to_be_sealed) = ready.to_be_sealed {
                     recovery::submit(
                         state_machine.replicate_policy,
                         state_machine.name.clone(),
                         state_machine.epoch,
-                        pending_epoch,
+                        to_be_sealed,
                         channel.clone(),
                         self.master.clone(),
                     );

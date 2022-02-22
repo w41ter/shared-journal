@@ -21,24 +21,24 @@ use std::{
 use futures::{stream, StreamExt};
 
 use super::{
-    core::{Message, MsgDetail},
-    Channel, Command, MemStore, ReplicatePolicy, WriterGroup,
+    core::{Message, MsgDetail, Replicate, ToBeSealed},
+    Channel, Command, ReplicatePolicy, WriterGroup,
 };
 use crate::{
     journal::{
         master::{remote::RemoteMaster, Master},
         store::{remote::Client, segment::WriteRequest, CompoundSegmentReader},
     },
-    storepb, Entry, Result, SegmentMeta, Sequence,
+    storepb, Entry, Result, Sequence,
 };
 
 pub struct RecoveryContext {
-    policy: ReplicatePolicy,
-    /// The epoch current leader belongs to.
+    stream_id: u64,
+    segment_epoch: u32,
     writer_epoch: u32,
-    segment_meta: SegmentMeta,
-    #[allow(dead_code)]
-    mem_store: MemStore,
+    policy: ReplicatePolicy,
+    data_is_completed: bool,
+    replicate: Box<Replicate>,
     channel: Channel,
     master: RemoteMaster,
     writer_group: WriterGroup,
@@ -48,29 +48,37 @@ pub(super) fn submit(
     policy: ReplicatePolicy,
     stream_name: String,
     writer_epoch: u32,
-    seg_epoch: u32,
+    to_be_sealed: ToBeSealed,
     channel: Channel,
     master: RemoteMaster,
 ) {
     tokio::spawn(async move {
-        // TODO(w41ter) handle error.
-        let segment_meta = master
-            .get_segment(&stream_name, seg_epoch)
-            .await
-            .expect("handle error")
-            .unwrap();
+        let (replicate, data_is_completed) = match to_be_sealed {
+            ToBeSealed::Rep(r) => (r, true),
+            ToBeSealed::Epoch(seg_epoch) => {
+                // TODO(w41ter) handle error.
+                let segment_meta = master
+                    .get_segment(&stream_name, seg_epoch)
+                    .await
+                    .expect("handle error")
+                    .unwrap();
+                (
+                    Box::new(Replicate::new(seg_epoch, segment_meta.copy_set)),
+                    false,
+                )
+            }
+        };
 
-        let writer_group = WriterGroup::new(
-            channel.stream_id(),
-            seg_epoch,
-            segment_meta.copy_set.clone(),
-        );
+        let writer_group =
+            WriterGroup::new(channel.stream_id(), replicate.epoch, replicate.copy_set());
         let ctx = RecoveryContext {
+            stream_id: channel.stream_id(),
+            segment_epoch: replicate.epoch,
             policy,
+            data_is_completed,
             writer_epoch,
+            replicate,
             writer_group,
-            mem_store: MemStore::new(seg_epoch),
-            segment_meta,
             channel,
             master,
         };
@@ -79,40 +87,36 @@ pub(super) fn submit(
 }
 
 async fn recovery(mut ctx: RecoveryContext) -> Result<()> {
-    // TODO(w41ter) if mem_store exists, we don't need to read pending entries from
-    // servers.
-
     let acked_index = seal(ctx.policy, ctx.writer_epoch, &mut ctx.writer_group).await?;
-    let mut entries_stream = read_pending_entries(
-        ctx.policy,
-        ctx.segment_meta.stream_id,
-        ctx.segment_meta.epoch,
-        ctx.writer_epoch,
-        acked_index,
-        &ctx.segment_meta.copy_set,
-    )
-    .await?;
+    if !ctx.data_is_completed {
+        let mut entries_stream = read_pending_entries(
+            ctx.policy,
+            ctx.stream_id,
+            ctx.segment_epoch,
+            ctx.writer_epoch,
+            acked_index,
+            &ctx.replicate.copy_set(),
+        )
+        .await?;
 
-    // FIXME(w41ter) found a efficient implementation.
-    let batch_threshold = 10;
-    let mut buf = vec![];
-    let mut next_index = acked_index + 1;
-    while let Some(entry) = entries_stream.next().await {
-        // NOTICE: Update entry's epoch to writer epoch.
-        let (_, mut entry) = entry?;
-        entry.set_epoch(ctx.writer_epoch);
-        buf.push(entry);
-        if buf.len() > batch_threshold {
-            // broadcast entries to ...
-            next_index += buf.len() as u32;
-            broadcast_entries(&mut ctx, next_index, std::mem::take(&mut buf)).await;
+        while let Some(entry) = entries_stream.next().await {
+            // NOTICE: Update entry's epoch to writer epoch.
+            let (_, mut entry) = entry?;
+            entry.set_epoch(ctx.writer_epoch);
+            ctx.replicate.append(entry);
         }
     }
-    if !buf.is_empty() {
-        broadcast_entries(&mut ctx, next_index, std::mem::take(&mut buf)).await;
-    }
 
-    ctx.master.seal_segment(ctx.segment_meta.stream_id).await?;
+    // FIXME(w41ter)
+    // 1. use replicate directly might lost some in-flights messages.
+    // 2. flush messages in async
+    // 3. determine end
+
+    // if !buf.is_empty() {
+    //     broadcast_entries(&mut ctx, next_index, std::mem::take(&mut buf)).await;
+    // }
+
+    ctx.master.seal_segment(ctx.stream_id).await?;
 
     let msg = Message {
         target: "self".into(),
@@ -124,6 +128,7 @@ async fn recovery(mut ctx: RecoveryContext) -> Result<()> {
     Ok(())
 }
 
+#[allow(unused)]
 async fn broadcast_entries(ctx: &mut RecoveryContext, next_index: u32, entries: Vec<Entry>) {
     let mut futures = vec![];
     let seg_epoch = ctx.writer_group.epoch();

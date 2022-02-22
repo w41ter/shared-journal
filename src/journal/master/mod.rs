@@ -25,7 +25,7 @@ use crate::{Result, Role, SegmentMeta, Sequence};
 /// Following -> Sealing -> Recovering -> Leading
 ///    ^                                    |
 ///    +------------------------------------+
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) enum ObserverState {
     /// A leader must seals the former epochs before starting to recovery a
