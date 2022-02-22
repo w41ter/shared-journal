@@ -20,6 +20,13 @@ use log::{error, info, warn};
 use super::{EpochState, MemStore, Progress, ReplicatePolicy};
 use crate::{journal::master::ObserverState, Entry, Error, Result, Role, Sequence, INITIAL_EPOCH};
 
+pub(crate) struct Learn {
+    pub target: String,
+    pub seg_epoch: u32,
+    pub writer_epoch: u32,
+    pub start_index: u32,
+}
+
 #[derive(Derivative, Clone)]
 #[derivative(Debug)]
 pub(crate) struct Write {
@@ -35,12 +42,21 @@ pub(crate) struct Write {
 
 #[derive(Derivative, Clone)]
 #[derivative(Debug)]
+pub(crate) struct Learned {
+    // The end is reached if entries is empty.
+    pub entries: Vec<(u32, Entry)>,
+}
+
+#[derive(Derivative, Clone)]
+#[derivative(Debug)]
 #[allow(unused)]
 pub(crate) enum MsgDetail {
     Received { index: u32 },
     Recovered,
     Rejected,
     Timeout { range: Range<u32>, bytes: usize },
+    Sealed { acked_index: u32 },
+    Learned(Learned),
 }
 
 impl Display for MsgDetail {
@@ -50,6 +66,8 @@ impl Display for MsgDetail {
             MsgDetail::Recovered => "RECOVERED",
             MsgDetail::Rejected => "REJECTED",
             MsgDetail::Timeout { .. } => "TIMEOUT",
+            MsgDetail::Sealed { .. } => "SEALED",
+            MsgDetail::Learned(_) => "LEARNED",
         };
         write!(f, "{}", desc)
     }
@@ -316,6 +334,8 @@ impl StreamStateMachine {
             MsgDetail::Received { index } => self.handle_received(msg.target, index),
             MsgDetail::Recovered => self.handle_recovered(msg.seg_epoch),
             MsgDetail::Timeout { range, bytes } => self.handle_timeout(msg.target, range, bytes),
+            MsgDetail::Learned(_learned) => {}
+            MsgDetail::Sealed { .. } => {}
             MsgDetail::Rejected => {}
         }
     }
