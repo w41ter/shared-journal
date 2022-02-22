@@ -274,12 +274,19 @@ impl StreamStateMachine {
                 // Sort in reverse to ensure that the smallest is at the end. See
                 // `StreamStateMachine::handle_recovered` for details.
                 self.pending_epochs.sort_by(|a, b| b.cmp(a));
+                self.replicate = new_replicate;
             }
+            debug_assert!(self.pending_epochs.len() <= 2);
         }
 
         info!(
-            "stream {} promote epoch from {} to {}, new role: {:?}, leader: {}",
-            self.stream_id, prev_epoch, epoch, self.role, self.leader
+            "stream {} promote epoch from {} to {}, new role {:?}, leader {}, num copy {}",
+            self.stream_id,
+            prev_epoch,
+            epoch,
+            self.role,
+            self.leader,
+            self.replicate.copy_set.len(),
         );
 
         true
@@ -339,7 +346,6 @@ impl StreamStateMachine {
 
     fn advance(&mut self) {
         debug_assert_eq!(self.role, Role::Leader);
-
         // Don't ack any entries if there exists a pending segment.
         if !self.pending_epochs.is_empty() {
             return;
@@ -379,10 +385,11 @@ impl StreamStateMachine {
     fn handle_recovered(&mut self, seg_epoch: u32) {
         debug_assert_eq!(self.role, Role::Leader);
         info!(
-            "{} receive {}, seg epoch: {}",
+            "{} receive {}, seg epoch: {}, num pending epochs {}",
             self,
             MsgDetail::Recovered,
-            seg_epoch
+            seg_epoch,
+            self.pending_epochs.len()
         );
 
         match self.pending_epochs.pop() {

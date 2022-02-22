@@ -231,6 +231,7 @@ impl Progress {
         if self.acked_index < acked_index {
             self.acked_index = acked_index;
         }
+        println!("on received {}", matched_index);
         if self.matched_index < matched_index {
             let consumed_bytes = self.sliding_window.release(matched_index);
             self.matched_index = matched_index;
