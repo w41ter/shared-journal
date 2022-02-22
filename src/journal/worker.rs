@@ -96,7 +96,7 @@ impl Channel {
         self.stream_id
     }
 
-    fn fetch(&self) -> Vec<Command> {
+    pub(crate) fn fetch(&self) -> Vec<Command> {
         let mut state = self.state.lock().unwrap();
         std::mem::take(&mut state.buf).into_iter().collect()
     }
