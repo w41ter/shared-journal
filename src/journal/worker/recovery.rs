@@ -22,7 +22,7 @@ use futures::{stream, StreamExt};
 
 use super::{
     core::{Message, MsgDetail, Replicate, ToBeSealed},
-    Channel, Command,  ReplicatePolicy, WriterGroup,
+    Channel, Command, ReplicatePolicy, WriterGroup,
 };
 use crate::{
     journal::{
@@ -107,7 +107,7 @@ async fn recovery(mut ctx: RecoveryContext) -> Result<()> {
         }
     }
 
-    // FIXME(w41ter) 
+    // FIXME(w41ter)
     // 1. use replicate directly might lost some in-flights messages.
     // 2. flush messages in async
     // 3. determine end
