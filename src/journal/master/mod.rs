@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use futures::Stream;
 
 use super::StreamMeta;
-use crate::{Result, Role, SegmentMeta, Sequence};
+use crate::{masterpb, Result, Role, SegmentMeta, Sequence};
 
 /// The state of an stream's observer. The transition of states is:
 ///
@@ -84,7 +84,7 @@ pub(crate) enum Command {
 
         /// It indicates that the segments need recovery, has not been sealed
         /// yet.
-        pending_epochs: Vec<u32>,
+        recovering_segments: Vec<masterpb::SegmentMeta>,
     },
 }
 

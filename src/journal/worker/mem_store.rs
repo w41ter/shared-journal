@@ -39,6 +39,13 @@ impl MemStore {
         }
     }
 
+    pub fn recovery(epoch: u32, first_index: u32) -> Self {
+        MemStore {
+            first_index,
+            ..MemStore::new(epoch)
+        }
+    }
+
     /// Returns the index of next entry.
     pub fn next_index(&self) -> u32 {
         self.first_index + self.entries.len() as u32
