@@ -41,7 +41,11 @@ impl From<masterpb::Command> for super::Command {
                 role: cmd.role.into(),
                 epoch: cmd.epoch,
                 leader: cmd.leader,
-                pending_epochs: cmd.pending_epochs,
+                recovering_segments: cmd
+                    .recovering_segments
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
             },
         }
     }
@@ -55,19 +59,19 @@ impl From<super::Command> for masterpb::Command {
                 epoch: 0,
                 role: crate::Role::Follower.into(),
                 leader: "".into(),
-                pending_epochs: Vec::default(),
+                recovering_segments: Vec::default(),
             },
             super::Command::Promote {
                 role,
                 epoch,
                 leader,
-                pending_epochs,
+                recovering_segments,
             } => masterpb::Command {
                 command_type: masterpb::CommandType::Promote as i32,
                 epoch,
                 role: role.into(),
                 leader,
-                pending_epochs,
+                recovering_segments: recovering_segments.into_iter().map(Into::into).collect(),
             },
         }
     }
@@ -369,8 +373,7 @@ pub(crate) mod tests {
             Command::Promote {
                 role,
                 epoch,
-                leader: _,
-                pending_epochs: _,
+                ..
             }
             if *epoch == 1 && *role == Role::Leader
         ));

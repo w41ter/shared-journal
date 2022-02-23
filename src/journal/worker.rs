@@ -20,6 +20,7 @@ mod timer;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    ops::Range,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Condvar, Mutex,
@@ -33,7 +34,7 @@ use tokio::{runtime::Handle as RuntimeHandle, sync::mpsc::UnboundedSender};
 
 pub(super) use self::progress::Progress;
 use self::{
-    core::{Message, MsgDetail, StreamStateMachine},
+    core::{Message, MsgDetail, MutKind, StreamStateMachine, Write},
     mem_store::MemStore,
     timer::ChannelTimer,
 };
@@ -43,7 +44,7 @@ use crate::{
         master::{remote::RemoteMaster, Command as MasterCmd, Master, ObserverMeta},
         store::segment::{SegmentWriter, WriteRequest},
     },
-    Result, Sequence,
+    masterpb, Result, Sequence,
 };
 
 #[derive(Derivative)]
@@ -55,7 +56,7 @@ pub(crate) enum Command {
         epoch: u32,
         leader: String,
         copy_set: Vec<String>,
-        pending_epochs: Vec<u32>,
+        recovering: Vec<masterpb::SegmentMeta>,
     },
     Msg(Message),
     Proposal {
@@ -243,46 +244,119 @@ impl WriterGroup {
     }
 }
 
-fn flush_write_requests(
+fn seal_segment(runtime: &RuntimeHandle, channel: Channel, master: RemoteMaster) {
+    runtime.spawn(async move {
+        master.seal_segment(channel.stream_id()).await.unwrap();
+    });
+}
+
+fn flush_sealing(
     runtime: &RuntimeHandle,
     channel: Channel,
     writer_group: &WriterGroup,
-    pending_writes: Vec<core::Write>,
+    target: String,
+    writer_epoch: u32,
 ) {
-    for write in pending_writes {
-        let mut writer = writer_group
-            .writers
-            .get(&write.target)
-            .expect("target not exists in copy group")
-            .clone();
-        let seg_epoch = writer_group.epoch();
-        let cloned_channel = channel.clone();
-        runtime.spawn(async move {
-            let target = write.target;
-            let write_req = WriteRequest {
-                epoch: write.epoch,
-                index: write.range.start,
-                acked: write.acked_seq,
-                entries: write.entries,
-            };
-            let detail = match writer.write(write_req).await {
-                Ok(index) => MsgDetail::Received { index },
-                Err(err) => {
-                    warn!("replicate entries to {}: {:?}", target, err);
-                    MsgDetail::Timeout {
-                        range: write.range,
-                        bytes: write.bytes,
-                    }
+    let mut writer = writer_group
+        .writers
+        .get(&target)
+        .expect("target not exists in copy group")
+        .clone();
+    let seg_epoch = writer_group.epoch();
+    runtime.spawn(async move {
+        let detail = match writer.seal(writer_epoch).await {
+            Ok(acked_index) => MsgDetail::Sealed { acked_index },
+            Err(err) => {
+                warn!("sealing segment to {}: {:?}", target, err);
+                MsgDetail::Timeout {
+                    range: Range { start: 1, end: 0 },
+                    bytes: 0,
                 }
-            };
-            let msg = Message {
-                target,
-                seg_epoch,
-                epoch: write.epoch,
+            }
+        };
+        let msg = Message {
+            target,
+            seg_epoch,
+            epoch: writer_epoch,
+            detail,
+        };
+        channel.submit(Command::Msg(msg));
+    });
+}
+
+fn flush_write(
+    runtime: &RuntimeHandle,
+    channel: Channel,
+    writer_group: &WriterGroup,
+    target: String,
+    segment_epoch: u32,
+    writer_epoch: u32,
+    write: Write,
+) {
+    let mut writer = writer_group
+        .writers
+        .get(&target)
+        .expect("target not exists in copy group")
+        .clone();
+    runtime.spawn(async move {
+        let write_req = WriteRequest {
+            epoch: writer_epoch,
+            index: write.range.start,
+            acked: write.acked_seq,
+            entries: write.entries,
+        };
+        let detail = match writer.write(write_req).await {
+            Ok(index) => MsgDetail::Received { index },
+            Err(err) => {
+                warn!("replicate entries to {}: {:?}", target, err);
+                MsgDetail::Timeout {
+                    range: write.range,
+                    bytes: write.bytes,
+                }
+            }
+        };
+        let msg = Message {
+            target,
+            seg_epoch: segment_epoch,
+            epoch: writer_epoch,
+            detail,
+        };
+        channel.submit(Command::Msg(msg));
+    });
+}
+
+fn flush_write_requests(
+    runtime: &RuntimeHandle,
+    channel: Channel,
+    master: &RemoteMaster,
+    writer_group: &WriterGroup,
+    pending_writes: Vec<core::Mutate>,
+) {
+    for mutate in pending_writes {
+        match mutate.kind {
+            MutKind::Seal => {
+                if mutate.target == "<MASTER>" {
+                    seal_segment(runtime, channel.clone(), master.clone());
+                } else {
+                    flush_sealing(
+                        runtime,
+                        channel.clone(),
+                        writer_group,
+                        mutate.target,
+                        mutate.writer_epoch,
+                    );
+                }
+            }
+            MutKind::Write(detail) => flush_write(
+                runtime,
+                channel.clone(),
+                writer_group,
+                mutate.target,
+                mutate.seg_epoch,
+                mutate.writer_epoch,
                 detail,
-            };
-            cloned_channel.submit(Command::Msg(msg));
-        });
+            ),
+        }
     }
 }
 
@@ -295,7 +369,7 @@ where
             role,
             epoch,
             leader,
-            pending_epochs,
+            recovering_segments,
         } => match master.get_segment(stream_name, epoch).await {
             Ok(Some(segment_meta)) => {
                 channel.submit(Command::Promote {
@@ -303,7 +377,7 @@ where
                     epoch,
                     leader,
                     copy_set: segment_meta.copy_set,
-                    pending_epochs,
+                    recovering: recovering_segments,
                 });
             }
             _ => {
@@ -516,7 +590,7 @@ impl Worker {
                         role,
                         leader,
                         copy_set,
-                        pending_epochs,
+                        recovering,
                     } => {
                         // TODO(w41ter) since the epoch has already promoted,
                         // the former one needs to be gc.
@@ -524,7 +598,16 @@ impl Worker {
                             (channel.stream_id(), epoch),
                             WriterGroup::new(channel.stream_id(), epoch, copy_set.clone()),
                         );
-                        state_machine.promote(epoch, role, leader, copy_set, pending_epochs);
+                        state_machine.promote(
+                            epoch,
+                            role,
+                            leader,
+                            copy_set,
+                            recovering
+                                .into_iter()
+                                .map(|m| (m.epoch, m.copy_set))
+                                .collect(),
+                        );
                         let state_observer = self.state_observers.get_mut(&stream_id);
                         if let Some(sender) = state_observer {
                             sender.send(state_machine.epoch_state()).unwrap_or_default();
@@ -544,19 +627,13 @@ impl Worker {
                 flush_write_requests(
                     &self.runtime_handle,
                     channel.clone(),
+                    &self.master,
                     writer_group,
                     ready.pending_writes,
                 );
                 applier.might_advance(ready.acked_seq);
-                if let Some(to_be_sealed) = ready.to_be_sealed {
-                    recovery::submit(
-                        state_machine.replicate_policy,
-                        state_machine.name.clone(),
-                        state_machine.epoch,
-                        to_be_sealed,
-                        channel.clone(),
-                        self.master.clone(),
-                    );
+                for learn in ready.pending_learns {
+                    recovery::learn_entries(&self.runtime_handle, channel.clone(), learn);
                 }
                 if ready.still_active {
                     // TODO(w41ter) support still active
@@ -643,7 +720,7 @@ mod tests {
             role: Role::Follower,
             leader: "leader_1".to_string(),
             copy_set: vec![],
-            pending_epochs: vec![],
+            recovering: vec![],
         });
 
         let second_epoch_state = receiver.recv().await.unwrap();
@@ -658,7 +735,7 @@ mod tests {
             role: Role::Leader,
             leader: "leader_2".to_string(),
             copy_set: vec![],
-            pending_epochs: vec![],
+            recovering: vec![],
         });
         let third_epoch_state = receiver.recv().await.unwrap();
         assert_eq!(third_epoch_state.epoch, new_epoch as u64);

@@ -153,7 +153,7 @@ impl StreamInfo {
             role: Role::Leader,
             epoch: self.epoch,
             leader: applicant.observer_id.clone(),
-            pending_epochs: vec![],
+            recovering_segments: vec![],
         }
     }
 
@@ -165,7 +165,7 @@ impl StreamInfo {
                     role: Role::Leader,
                     epoch: self.epoch,
                     leader: observer_id.to_string(),
-                    pending_epochs: vec![],
+                    recovering_segments: vec![],
                 };
             }
         }
@@ -173,7 +173,7 @@ impl StreamInfo {
             role: Role::Follower,
             epoch: self.epoch,
             leader: self.leader.as_ref().cloned().unwrap_or_default(),
-            pending_epochs: vec![],
+            recovering_segments: vec![],
         }
     }
 }
