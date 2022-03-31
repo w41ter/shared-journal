@@ -32,6 +32,7 @@ use super::{
     version::{Version, VersionSet},
 };
 use crate::{
+    bg::{BgTaskIssuer, BgWorker},
     fs::layout,
     log::{LogEngine, LogFileManager},
     DbOption, Entry, Error, Result, Sequence,
@@ -81,8 +82,10 @@ fn recover_log_engine<P: AsRef<Path>>(
     opt: Arc<DbOption>,
     version: Version,
     db_layout: &mut DbLayout,
+    bg_sender: BgTaskIssuer,
 ) -> Result<(LogEngine, HashMap<u64, PartialStream<LogFileManager>>)> {
-    let log_file_mgr = LogFileManager::new(&base_dir, db_layout.max_file_number + 1, opt);
+    let log_file_mgr =
+        LogFileManager::new(&base_dir, db_layout.max_file_number + 1, opt, bg_sender);
     log_file_mgr.recycle_all(
         version
             .log_number_record
@@ -138,7 +141,7 @@ pub struct StreamDb {
 }
 
 impl StreamDb {
-    pub fn open<P: AsRef<Path>>(base_dir: P, opt: DbOption) -> Result<StreamDb> {
+    pub async fn open<P: AsRef<Path>>(base_dir: P, opt: DbOption) -> Result<StreamDb> {
         std::fs::create_dir_all(&base_dir)?;
         let opt = Arc::new(opt);
 
@@ -155,15 +158,30 @@ impl StreamDb {
             Self::create(&base_dir)?;
         }
 
-        Self::recover(base_dir, opt)
+        let (bg_sender, bg_receiver) = crate::bg::bg_channel();
+        let db = Self::recover(base_dir, opt, bg_sender)?;
+        let mut bg_worker = BgWorker::new(db.clone(), bg_receiver);
+        tokio::spawn(async move {
+            bg_worker.run().await;
+        });
+        Ok(db)
     }
 
-    fn recover<P: AsRef<Path>>(base_dir: P, opt: Arc<DbOption>) -> Result<StreamDb> {
+    fn recover<P: AsRef<Path>>(
+        base_dir: P,
+        opt: Arc<DbOption>,
+        bg_sender: BgTaskIssuer,
+    ) -> Result<StreamDb> {
         let version_set = VersionSet::recover(&base_dir).unwrap();
         let mut db_layout = analyze_db_layout(&base_dir, version_set.manifest_number())?;
         version_set.set_next_file_number(db_layout.max_file_number + 1);
-        let (log_engine, streams) =
-            recover_log_engine(&base_dir, opt, version_set.current(), &mut db_layout)?;
+        let (log_engine, streams) = recover_log_engine(
+            &base_dir,
+            opt,
+            version_set.current(),
+            &mut db_layout,
+            bg_sender,
+        )?;
         remove_obsoleted_files(db_layout);
         let streams = streams
             .into_iter()
@@ -228,10 +246,7 @@ impl StreamDb {
     }
 
     pub async fn truncate(&self, stream_id: u64, keep_seq: Sequence) -> Result<()> {
-        let stream_meta = self
-            .must_get_stream(stream_id)
-            .stream_meta(keep_seq)
-            .await?;
+        let mut stream_meta = self.must_get_stream(stream_id).stream_meta().await?;
 
         if u64::from(keep_seq) > stream_meta.acked_seq {
             return Err(Error::InvalidArgument(format!(
@@ -240,8 +255,23 @@ impl StreamDb {
             )));
         }
 
+        stream_meta.initial_seq = keep_seq.into();
         self.version_set.truncate_stream(stream_meta).await?;
+        self.advance_grace_period_of_version_set().await;
 
+        Ok(())
+    }
+
+    pub async fn recycle_log(&self, log_number: u64, stream_ids: Vec<u64>) -> Result<()> {
+        let mut updated_streams = Vec::new();
+        for stream_id in stream_ids {
+            let stream_meta = self.must_get_stream(stream_id).stream_meta().await?;
+            updated_streams.push(stream_meta);
+        }
+
+        self.version_set
+            .recycle_log(log_number, updated_streams)
+            .await?;
         self.advance_grace_period_of_version_set().await;
 
         Ok(())
@@ -364,24 +394,22 @@ impl StreamMixin {
         Ok(acked_index)
     }
 
-    async fn stream_meta(&self, keep_seq: Sequence) -> Result<StreamMeta> {
+    async fn stream_meta(&self) -> Result<StreamMeta> {
         // Read the memory state and wait until all previous txn are committed.
-        let (acked_seq, sealed_table, waiter) = {
+        let (acked_seq, initial_seq, sealed_table, waiter) = {
             let mut core = self.core.lock().unwrap();
             let acked_seq = core.storage.acked_seq();
+            let initial_seq = core.storage.initial_seq();
             let sealed_table = core.storage.sealed_epochs();
-            (
-                acked_seq,
-                sealed_table,
-                core.writer.submit_txn(self.core.clone(), None),
-            )
+            let waiter = core.writer.submit_txn(self.core.clone(), None);
+            (acked_seq, initial_seq, sealed_table, waiter)
         };
         waiter.await?;
 
         Ok(StreamMeta {
             stream_id: self.stream_id,
             acked_seq: acked_seq.into(),
-            initial_seq: keep_seq.into(),
+            initial_seq: initial_seq.into(),
             replicas: sealed_table
                 .into_iter()
                 .map(|(epoch, promised)| ReplicaMeta {

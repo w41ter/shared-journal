@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let mut opt = DbOption::default();
     opt.create_if_missing = true;
-    let db = StreamDb::open(args.db, opt)?;
+    let db = StreamDb::open(args.db, opt).await?;
     bootstrap_service(&args.endpoint, db).await?;
 
     println!("Bye");

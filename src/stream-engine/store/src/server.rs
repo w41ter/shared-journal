@@ -34,7 +34,6 @@ impl Server {
     }
 }
 
-#[allow(unused)]
 #[async_trait]
 impl store_server::Store for Server {
     type ReadStream = SegmentReader;

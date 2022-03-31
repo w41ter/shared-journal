@@ -21,7 +21,6 @@ pub(crate) use group::GroupReader;
 
 use crate::{core::Progress, Sequence};
 
-#[allow(unused)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Policy {
     /// A simple strategy that allows ack entries as long as one copy holds the
@@ -31,7 +30,6 @@ pub enum Policy {
     Simple,
 }
 
-#[allow(dead_code)]
 impl Policy {
     /// Calculate the `acked_sequence` based on the matched indexes.
     pub(super) fn advance_acked_sequence(

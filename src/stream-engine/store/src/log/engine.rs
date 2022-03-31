@@ -317,6 +317,7 @@ mod tests {
     use stream_engine_proto::{Entry, EntryType, Record};
 
     use super::*;
+    use crate::bg::bg_channel;
 
     fn new_tempdir() -> Result<PathBuf> {
         let dir = tempfile::tempdir()?.path().to_owned();
@@ -326,11 +327,12 @@ mod tests {
 
     #[tokio::test]
     async fn log_engine_recover() -> Result<()> {
+        let (bg_issuer, _) = bg_channel();
         let mut opt = DbOption::default();
         opt.log.log_file_size = 1024 * 1024 * 32;
         let opt = Arc::new(opt);
         let dir = new_tempdir()?;
-        let log_file_mgr = LogFileManager::new(&dir, 100, opt.clone());
+        let log_file_mgr = LogFileManager::new(&dir, 100, opt.clone(), bg_issuer.clone());
         let log_engine = LogEngine::recover(&dir, vec![], log_file_mgr, &mut |_, _| Ok(()))?;
 
         let mut expect_contents = vec![];
@@ -355,7 +357,7 @@ mod tests {
         drop(log_engine);
 
         let mut read_contents = vec![];
-        let log_file_mgr = LogFileManager::new(&dir, 100, opt.clone());
+        let log_file_mgr = LogFileManager::new(&dir, 100, opt.clone(), bg_issuer);
         let reader = &mut |_, record| {
             read_contents.push(record);
             Ok(())

@@ -37,7 +37,6 @@ pub struct Stream {
     master_client: MasterClient,
 }
 
-#[allow(unused)]
 impl Stream {
     pub(super) fn new(
         tenant: String,

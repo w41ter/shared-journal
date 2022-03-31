@@ -16,7 +16,6 @@ use std::{fmt::Display, ops::Range};
 
 use crate::{Entry, Sequence};
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct Learn {
     pub target: String,
@@ -25,7 +24,6 @@ pub(crate) struct Learn {
     pub start_index: u32,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct Mutate {
     pub target: String,

@@ -72,7 +72,6 @@ impl CongestMixin {
     }
 }
 
-#[allow(dead_code)]
 struct SlidingWindow {
     /// The number of bytes which already known the response. Includes timeout
     /// and received entries.

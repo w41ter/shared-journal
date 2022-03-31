@@ -20,7 +20,6 @@ use crate::{
     Result, Sequence,
 };
 
-#[allow(dead_code)]
 pub struct StreamReader {
     policy: ReplicatePolicy,
     transport: Transport,
@@ -31,7 +30,6 @@ pub struct StreamReader {
     segment_reader: Option<SegmentReader>,
 }
 
-#[allow(dead_code)]
 impl StreamReader {
     pub(crate) fn new(
         policy: ReplicatePolicy,
@@ -78,7 +76,6 @@ impl StreamReader {
     }
 }
 
-#[allow(dead_code)]
 impl StreamReader {
     /// Seeks to the given sequence.
     pub async fn seek(&mut self, sequence: u64) -> Result<()> {

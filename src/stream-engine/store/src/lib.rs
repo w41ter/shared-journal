@@ -18,6 +18,7 @@
 #![feature(path_try_exists)]
 #![feature(write_all_vectored)]
 
+mod bg;
 mod db;
 mod fs;
 mod log;
@@ -48,7 +49,7 @@ mod tests {
             create_if_missing: true,
             ..Default::default()
         };
-        let db = StreamDb::open(tmp, db_opt)?;
+        let db = StreamDb::open(tmp, db_opt).await?;
 
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let local_addr = listener.local_addr()?;

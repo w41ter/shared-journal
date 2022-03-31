@@ -79,7 +79,7 @@ pub struct StreamVersion {
     pub stream_id: u64,
     pub log_number_record: LogNumberRecord,
 
-    pub stream_meta: manifest::StreamMeta,
+    pub stream_meta: StreamMeta,
 
     next_edit: AtomicArcPtr<VersionEdit>,
 }
@@ -118,7 +118,7 @@ pub const MIN_AVAIL_LOG_NUMBER: u64 = 1;
 #[derive(Clone, Default)]
 pub struct Version {
     pub log_number_record: LogNumberRecord,
-    pub streams: HashMap<u64, manifest::StreamMeta>,
+    pub streams: HashMap<u64, StreamMeta>,
 
     next_edit: AtomicArcPtr<VersionEdit>,
 }
@@ -143,7 +143,6 @@ impl Version {
         }
     }
 
-    #[allow(dead_code)]
     #[inline(always)]
     pub fn is_log_recycled(&self, log_number: u64) -> bool {
         self.log_number_record.is_log_recycled(log_number)
@@ -283,6 +282,31 @@ impl VersionSet {
         let version_edit = Box::new(VersionEdit {
             raw_edit: manifest::VersionEdit {
                 streams: vec![stream_meta],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        core.log_and_apply(version_edit)
+    }
+
+    pub async fn recycle_log(
+        &self,
+        log_number: u64,
+        updated_streams: Vec<StreamMeta>,
+    ) -> Result<()> {
+        let mut core = self.core.lock().unwrap();
+        // Ensure there no any edit would be added before this one is finished.
+        core.version.try_apply_edits();
+        if core.version.is_log_recycled(log_number) {
+            return Err(Error::Staled(format!(
+                "log {} has been recycled before",
+                log_number
+            )));
+        }
+
+        let version_edit = Box::new(VersionEdit {
+            raw_edit: manifest::VersionEdit {
+                streams: updated_streams,
                 ..Default::default()
             },
             ..Default::default()

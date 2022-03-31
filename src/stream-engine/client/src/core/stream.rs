@@ -48,7 +48,6 @@ impl Display for StreamStateMachine {
     }
 }
 
-#[allow(dead_code)]
 impl StreamStateMachine {
     pub fn new(stream_id: u64) -> Self {
         StreamStateMachine {

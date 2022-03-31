@@ -212,7 +212,6 @@ pub(crate) struct WorkerOption {
     pub runtime_handle: RuntimeHandle,
 }
 
-#[allow(dead_code)]
 pub(crate) struct Worker {
     io_ctx: Arc<IoContext>,
     mono_timer: MonoTimer<EventChannel<Launcher>>,
@@ -221,7 +220,6 @@ pub(crate) struct Worker {
     streams: HashMap<u64, StreamMixin<Launcher>>,
 }
 
-#[allow(dead_code)]
 impl Worker {
     pub fn new(opt: WorkerOption) -> Self {
         let io_ctx = IoContext {

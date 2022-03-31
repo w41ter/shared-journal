@@ -96,6 +96,11 @@ where
     }
 
     #[inline(always)]
+    pub fn initial_seq(&self) -> Sequence {
+        self.initial_seq
+    }
+
+    #[inline(always)]
     pub fn sealed_epochs(&self) -> HashMap<u32, u32> {
         self.sealed.clone()
     }

@@ -85,7 +85,6 @@ enum GroupState {
     Done,
 }
 
-#[allow(unused)]
 pub(crate) struct GroupReader {
     reading_progress: HashMap<String, ReadingProgress>,
     num_ready: usize,
@@ -95,7 +94,6 @@ pub(crate) struct GroupReader {
     policy: GroupPolicy,
 }
 
-#[allow(dead_code)]
 impl GroupReader {
     pub(super) fn new(
         policy: GroupPolicy,

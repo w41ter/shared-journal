@@ -20,6 +20,7 @@ use std::{
 };
 
 use crate::{
+    bg::BgTaskIssuer,
     fs::{layout, FileExt},
     DbOption, IoResult,
 };
@@ -30,29 +31,40 @@ pub(crate) trait ReleaseReferringLogFile {
     fn release(&self, stream_id: u64, log_number: u64);
 }
 
+struct LogFileRef {
+    released_streams: HashSet<u64>,
+    touched_streams: HashSet<u64>,
+}
+
 #[derive(Clone)]
 pub struct LogFileManager {
     opt: Arc<DbOption>,
     base_dir: PathBuf,
+    issuer: BgTaskIssuer,
     inner: Arc<Mutex<LogFileManagerInner>>,
 }
 
 struct LogFileManagerInner {
     next_log_number: u64,
     recycled_log_files: VecDeque<u64>,
-    /// log_number => { stream_id }.
-    refer_streams: HashMap<u64, HashSet<u64>>,
+    log_file_refs: HashMap<u64, LogFileRef>,
 }
 
 impl LogFileManager {
-    pub fn new<P: AsRef<Path>>(base_dir: P, next_log_number: u64, opt: Arc<DbOption>) -> Self {
+    pub fn new<P: AsRef<Path>>(
+        base_dir: P,
+        next_log_number: u64,
+        opt: Arc<DbOption>,
+        issuer: BgTaskIssuer,
+    ) -> Self {
         LogFileManager {
             opt,
             base_dir: base_dir.as_ref().to_path_buf(),
+            issuer,
             inner: Arc::new(Mutex::new(LogFileManagerInner {
                 recycled_log_files: VecDeque::new(),
                 next_log_number,
-                refer_streams: HashMap::new(),
+                log_file_refs: HashMap::new(),
             })),
         }
     }
@@ -98,11 +110,16 @@ impl LogFileManager {
     /// A log file is filled, delegate lifecycle to LogFileManager with the
     /// reference of streams.
     pub fn delegate(&self, log_number: u64, refer_streams: HashSet<u64>) {
+        debug_assert!(!refer_streams.is_empty());
+        let log_file_ref = LogFileRef {
+            released_streams: HashSet::new(),
+            touched_streams: refer_streams,
+        };
         let mut inner = self.inner.lock().unwrap();
         assert!(
             inner
-                .refer_streams
-                .insert(log_number, refer_streams)
+                .log_file_refs
+                .insert(log_number, log_file_ref)
                 .is_none(),
             "each file only allow to delegate once"
         );
@@ -115,14 +132,24 @@ impl LogFileManager {
 
 impl ReleaseReferringLogFile for LogFileManager {
     fn release(&self, stream_id: u64, log_number: u64) {
-        let mut inner = self.inner.lock().unwrap();
-        if let Some(stream_set) = inner.refer_streams.get_mut(&log_number) {
-            stream_set.remove(&stream_id);
-            if stream_set.is_empty() {
-                inner.refer_streams.remove(&log_number);
-                // TODO(walter) submit background task, then add log number into
-                // recycled log files.
+        let touched_streams = {
+            let mut inner = self.inner.lock().unwrap();
+            let file_ref = match inner.log_file_refs.get_mut(&log_number) {
+                None => return,
+                Some(file_ref) => file_ref,
+            };
+            file_ref.released_streams.insert(stream_id);
+            if file_ref.released_streams.len() != file_ref.touched_streams.len() {
+                return;
             }
-        }
+            inner
+                .log_file_refs
+                .remove(&stream_id)
+                .unwrap()
+                .touched_streams
+        };
+
+        self.issuer
+            .recycle_log(log_number, touched_streams.into_iter().collect());
     }
 }

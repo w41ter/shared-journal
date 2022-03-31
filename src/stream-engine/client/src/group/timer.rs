@@ -64,7 +64,6 @@ pub(super) struct MonoTimer<H: TimerHandle> {
     state: Arc<(Mutex<TimerState<H>>, AtomicBool)>,
 }
 
-#[allow(dead_code)]
 impl<H: TimerHandle> MonoTimer<H> {
     pub fn new(timeout_ms: u64) -> Self {
         MonoTimer {
