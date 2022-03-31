@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use clap::Parser;
-use stream_engine_master::Server as MasterServer;
+use stream_engine_master::{build_orchestrator, Config, Master, Server as MasterServer};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 
@@ -30,7 +30,9 @@ struct Args {
 }
 
 async fn bootstrap_service(endpoint: &str, replicas: &[String]) -> Result<()> {
-    let master_server = MasterServer::new(replicas.to_owned());
+    let config = Config::default();
+    let master = Master::new(config, build_orchestrator(replicas.to_owned()));
+    let master_server = MasterServer::new(master);
     let listener = TcpListener::bind(endpoint).await?;
     tonic::transport::Server::builder()
         .add_service(master_server.into_service())

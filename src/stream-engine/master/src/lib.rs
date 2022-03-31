@@ -13,9 +13,12 @@
 // limitations under the License.
 
 mod master;
+mod orchestrator;
 mod server;
 mod stream;
 
+pub use master::{Config, Master};
+pub use orchestrator::{build_orchestrator, Instance};
 pub use stream_engine_common::{
     error::{Error, Result},
     Sequence,
@@ -31,14 +34,20 @@ pub mod tests {
     use tokio_stream::wrappers::TcpListenerStream;
 
     use super::*;
-    use crate::Result;
+    use crate::{
+        master::{Config, Master},
+        orchestrator::simple::SimpleOrchestrator,
+        Result,
+    };
 
     pub async fn build_master(replicas: &[&str]) -> Result<String> {
         let replicas: Vec<String> = replicas.iter().map(ToString::to_string).collect();
+        let orchestrator = Box::new(SimpleOrchestrator::new(replicas));
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let local_addr = listener.local_addr()?;
         tokio::task::spawn(async {
-            let server = Server::new(replicas);
+            let master = Master::new(Config::default(), orchestrator);
+            let server = Server::new(master);
             tonic::transport::Server::builder()
                 .add_service(server.into_service())
                 .serve_with_incoming(TcpListenerStream::new(listener))

@@ -17,7 +17,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use stream_engine_proto::*;
 use tokio::sync::Mutex;
 
-use crate::{stream::StreamInfo, Error, Result};
+use crate::{orchestrator::Orchestrator, stream::StreamInfo, Error, Result};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -51,10 +51,7 @@ impl Default for Config {
 pub struct Master {
     pub config: Config,
 
-    // FIXME(w41ter)
-    // This is a temporary implementation, which needs to be
-    // supported on orchestrator.
-    pub stores: Vec<String>,
+    pub orchestrator: Arc<Box<dyn Orchestrator>>,
     inner: Arc<Mutex<MasterInner>>,
 }
 
@@ -64,14 +61,14 @@ struct MasterInner {
 }
 
 impl Master {
-    pub fn new(config: Config, stores: Vec<String>) -> Self {
+    pub fn new(config: Config, orchestrator: Box<dyn Orchestrator>) -> Self {
         let inner = MasterInner {
             next_id: 1,
             tenants: HashMap::new(),
         };
         Self {
             config,
-            stores,
+            orchestrator: Arc::new(orchestrator),
             inner: Arc::new(Mutex::new(inner)),
         }
     }

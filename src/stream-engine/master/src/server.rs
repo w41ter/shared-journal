@@ -16,7 +16,7 @@ use stream_engine_proto::*;
 use tonic::{Request, Response, Status};
 
 use crate::{
-    master::{Config, Master, Tenant},
+    master::{Master, Tenant},
     stream::{ObserverMeta, StreamInfo},
     Error, Result,
 };
@@ -28,11 +28,8 @@ pub struct Server {
 }
 
 impl Server {
-    // FIXME(w41ter) Support address lookup
-    pub fn new(stores: Vec<String>) -> Self {
-        Self {
-            master: Master::new(Config::default(), stores),
-        }
+    pub fn new(master: Master) -> Self {
+        Self { master }
     }
 
     pub fn into_service(self) -> master_server::MasterServer<Self> {
@@ -79,13 +76,15 @@ impl master_server::Master for Server {
             acked_seq: req.acked_seq.into(),
         };
 
+        let stores = self
+            .master
+            .orchestrator
+            .list_instances()?
+            .into_iter()
+            .map(|i| i.address)
+            .collect::<Vec<_>>();
         let commands = stream
-            .heartbeat(
-                &self.master.config,
-                &self.master.stores,
-                observer_meta,
-                req.role.into(),
-            )
+            .heartbeat(&self.master.config, &stores, observer_meta, req.role.into())
             .await?;
 
         Ok(Response::new(HeartbeatResponse { commands }))
