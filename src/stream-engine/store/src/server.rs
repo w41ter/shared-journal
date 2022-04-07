@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use components_metrics::stream_engine::store::*;
 use stream_engine_proto::*;
 use tonic::{async_trait, Request, Response, Status};
 
@@ -43,6 +44,7 @@ impl store_server::Store for Server {
     }
 
     async fn read(&self, input: Request<ReadRequest>) -> Result<Response<Self::ReadStream>> {
+        STORE_RPC_READ_QPS.inc();
         let req = input.into_inner();
         let stream = self.db.read(
             req.stream_id,
@@ -102,6 +104,14 @@ impl Server {
         writer_epoch: u32,
         req: WriteRequest,
     ) -> Result<WriteResponse> {
+        STORE_RPC_WRITE_QPS.inc();
+        STORE_RECEIVED_ENTRIES_TOTAL.inc_by(req.entries.len() as u64);
+        println!(
+            "receive write request, epoch {}, index {}, {} entries",
+            req.segment_epoch,
+            req.first_index,
+            req.entries.len()
+        );
         let (matched_index, acked_index) = self
             .db
             .write(
@@ -126,6 +136,7 @@ impl Server {
         writer_epoch: u32,
         req: SealRequest,
     ) -> Result<SealResponse> {
+        STORE_RPC_SEAL_QPS.inc();
         let acked_index = self
             .db
             .seal(stream_id, req.segment_epoch, writer_epoch)
@@ -138,6 +149,7 @@ impl Server {
         stream_id: u64,
         req: TruncateRequest,
     ) -> Result<TruncateResponse> {
+        STORE_RPC_TRUNCATE_QPS.inc();
         self.db.truncate(stream_id, req.keep_seq.into()).await?;
         Ok(TruncateResponse {})
     }

@@ -15,6 +15,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
+use components_metrics::run_metrics_service;
 use stream_engine_store::{DbOption, Server as StoreServer, StreamDb};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -49,6 +50,9 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let args = Args::parse();
+    tokio::spawn(async {
+        run_metrics_service(21720).await;
+    });
     let mut opt = DbOption::default();
     opt.create_if_missing = true;
     let db = StreamDb::open(args.db, opt).await?;

@@ -203,7 +203,7 @@ impl IoScheduler {
                 }
                 Err(error) => {
                     error!(
-                        "stream {} epoch {} flush write to {}: {}",
+                        "stream {} epoch {} flush write to {}: {:?}",
                         stream_id, segment_epoch, target, error
                     );
                     channel.on_msg(Message::write_timeout(

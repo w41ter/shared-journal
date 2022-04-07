@@ -200,6 +200,11 @@ impl Progress {
         self.matched_index
     }
 
+    #[inline(always)]
+    pub fn next_index(&self) -> u32 {
+        self.next_index
+    }
+
     /// Return which chunk needs to replicate to the target.
     pub fn next_chunk(&mut self, next_index: u32) -> (Range<u32>, usize) {
         let avail = self.sliding_window.available();

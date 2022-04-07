@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use stream_engine_proto::*;
+use components_metrics::stream_engine::client::*;
 use tonic::{transport::Channel, Streaming};
 
 use crate::{Error, Result};
@@ -46,6 +47,7 @@ impl StoreClient {
         type Request = mutate_request_union::Request;
         type Response = mutate_response_union::Response;
 
+        let _timer = CLIENT_STORE_WRITE_RPC_LATENCY.start_timer();
         let req = MutateRequest {
             stream_id,
             writer_epoch,
@@ -70,6 +72,7 @@ impl StoreClient {
         type Request = mutate_request_union::Request;
         type Response = mutate_response_union::Response;
 
+        let _timer = CLIENT_STORE_SEAL_RPC_LATENCY.start_timer();
         let req = MutateRequest {
             stream_id,
             writer_epoch,
@@ -88,6 +91,7 @@ impl StoreClient {
 
 impl StoreClient {
     pub async fn read(&self, input: ReadRequest) -> crate::Result<Streaming<ReadResponse>> {
+        let _timer = CLIENT_STORE_READ_RPC_LATENCY.start_timer();
         let mut client = self.client.clone();
         let resp = client.read(input).await?;
         Ok(resp.into_inner())

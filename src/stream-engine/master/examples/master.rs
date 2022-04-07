@@ -14,6 +14,7 @@
 
 use clap::Parser;
 use stream_engine_master::{build_orchestrator, Config, Master, Server as MasterServer};
+use components_metrics::run_metrics_service;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 
@@ -47,6 +48,9 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let args = Args::parse();
+    tokio::spawn(async {
+        run_metrics_service(21721).await;
+    });
     bootstrap_service(&args.endpoint, &args.stores).await?;
 
     println!("Bye");

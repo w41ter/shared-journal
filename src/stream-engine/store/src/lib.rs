@@ -25,6 +25,7 @@ mod log;
 mod opt;
 mod server;
 mod sync;
+mod metrics;
 
 pub use db::StreamDb;
 pub use opt::*;

@@ -149,6 +149,13 @@ impl Replicate {
         let mut pending_writes = vec![];
         for (server_id, progress) in &mut self.copy_set {
             let next_index = self.mem_store.next_index();
+            println!(
+                "server id {} matched index {} next index {} , total next index {}",
+                server_id,
+                progress.matched_index(),
+                progress.next_index(),
+                next_index
+            );
             let (Range { start, mut end }, quota) = progress.next_chunk(next_index);
             let (acked_seq, entries, bytes) = if quota > 0
                 && start == next_index

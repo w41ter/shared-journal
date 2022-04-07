@@ -223,6 +223,13 @@ impl Applier {
     fn might_advance(&mut self, acked_seq: Sequence) {
         while let Some((seq, _)) = self.proposals.front() {
             if *seq > acked_seq {
+                // let seq = *seq;
+                // println!(
+                //     "there has {} pending proposals, seq {}, acked seq {}",
+                //     self.proposals.len(),
+                //     seq,
+                //     acked_seq
+                // );
                 break;
             }
 
