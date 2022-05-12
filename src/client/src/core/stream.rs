@@ -167,8 +167,8 @@ impl StreamStateMachine {
         }
 
         info!(
-            "stream {} promote epoch from {} to {}, new role {:?}, leader {}, recovery epochs {:?}",
-            self.stream_id, prev_epoch, epoch, self.role, self.leader, recovering_epochs
+            "stream {} promote epoch from {} to {}, prev role {:?} new role {:?}, leader {}, recovery epochs {:?}",
+            self.stream_id, prev_epoch, epoch, prev_role, self.role, self.leader, recovering_epochs
         );
 
         true
@@ -278,6 +278,10 @@ impl StreamStateMachine {
         acked_index: u32,
     ) {
         debug_assert_eq!(self.role, Role::Leader);
+        info!(
+            "stream {} handle receive from {}, segment epoch {}, matched index {}, acked index {}",
+            self.stream_id, target, segment_epoch, matched_index, acked_index
+        );
         if self.writer_epoch == segment_epoch {
             self.replicate
                 .handle_received(target, matched_index, acked_index);
@@ -321,6 +325,9 @@ impl StreamStateMachine {
         );
         if let Some(replicate) = self.recovering_replicates.get_mut(&epoch) {
             replicate.handle_learned(target, entries);
+            // Might all entries has been acked by all replicas, but we don't broadcast any
+            // messages to those replicas.
+            Self::try_to_finish_recovering(self.stream_id, &mut self.ready, replicate);
         } else {
             warn!("{} receive staled LEARNED of epoch {}", self, epoch);
         }
@@ -353,6 +360,11 @@ impl StreamStateMachine {
     }
 
     fn try_to_finish_recovering(stream_id: u64, ready: &mut Ready, replicate: &Replicate) {
+        info!(
+            "try to finish recovering: {:?}, enough {}",
+            ready.restored_segment,
+            replicate.is_enough_targets_acked()
+        );
         if ready.restored_segment.is_none() && replicate.is_enough_targets_acked() {
             info!(
                 "stream {} segment {} is recovered, now make it sealed",

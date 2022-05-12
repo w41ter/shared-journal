@@ -14,7 +14,7 @@
 
 syntax = "proto3";
 
-package streamengine.store.manifest.v1;
+package sharedjournal.store.manifest.v1;
 
 // A range express [start, end).
 message EpochRange {

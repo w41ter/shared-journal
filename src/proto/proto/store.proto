@@ -16,7 +16,7 @@ syntax = "proto3";
 
 import public "store-meta.proto";
 
-package streamengine.store.v1;
+package sharedjournal.store.v1;
 
 service Store {
     // Read some entries from a segment.

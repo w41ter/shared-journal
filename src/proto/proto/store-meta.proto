@@ -14,7 +14,7 @@
 
 syntax = "proto3";
 
-package streamengine.store.meta.v1;
+package sharedjournal.store.meta.v1;
 
 enum EntryType {
     HOLE = 0;

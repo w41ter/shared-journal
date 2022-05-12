@@ -13,10 +13,11 @@
 // limitations under the License.
 
 use clap::Parser;
-use shared_journal_master::{build_orchestrator, Config, Master, Server as MasterServer};
 use components_metrics::run_metrics_service;
+use shared_journal_master::{build_orchestrator, Config, Master, Server as MasterServer};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
+use tracing::info;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -35,6 +36,7 @@ async fn bootstrap_service(endpoint: &str, replicas: &[String]) -> Result<()> {
     let master = Master::new(config, build_orchestrator(replicas.to_owned()));
     let master_server = MasterServer::new(master);
     let listener = TcpListener::bind(endpoint).await?;
+    info!("service listen on {}", endpoint);
     tonic::transport::Server::builder()
         .add_service(master_server.into_service())
         .serve_with_incoming(TcpListenerStream::new(listener))

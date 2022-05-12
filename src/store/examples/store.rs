@@ -16,6 +16,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use components_metrics::run_metrics_service;
+use tracing::info;
 use shared_journal_store::{DbOption, Server as StoreServer, StreamDb};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -37,6 +38,7 @@ async fn bootstrap_service(endpoint: &str, db: StreamDb) -> Result<()> {
 
     let listener = TcpListener::bind(endpoint).await?;
     let store_server = StoreServer::new(db);
+    info!("service listen on {}", endpoint);
     Server::builder()
         .add_service(store_server.into_service())
         .serve_with_incoming(TcpListenerStream::new(listener))

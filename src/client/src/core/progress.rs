@@ -262,7 +262,12 @@ impl Progress {
 
     /// The target has received and persisted entries.
     pub fn on_received(&mut self, matched_index: u32, acked_index: u32) {
-        debug_assert!(acked_index <= matched_index);
+        debug_assert!(
+            acked_index <= matched_index,
+            "acked_index {}, matched index {}",
+            acked_index,
+            matched_index
+        );
 
         if self.acked_index < acked_index {
             self.acked_index = acked_index;

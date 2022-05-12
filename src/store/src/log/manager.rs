@@ -110,7 +110,6 @@ impl LogFileManager {
     /// A log file is filled, delegate lifecycle to LogFileManager with the
     /// reference of streams.
     pub fn delegate(&self, log_number: u64, refer_streams: HashSet<u64>) {
-        debug_assert!(!refer_streams.is_empty());
         let log_file_ref = LogFileRef {
             released_streams: HashSet::new(),
             touched_streams: refer_streams,

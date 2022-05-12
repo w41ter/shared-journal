@@ -58,7 +58,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    for idx in 0..2 {
+    for idx in 0..1 {
         let stream_cloned = stream.clone();
         tokio::spawn(async move {
             let values = vec![0u8; 1024];

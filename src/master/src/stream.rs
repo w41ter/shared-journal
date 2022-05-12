@@ -275,7 +275,7 @@ impl StreamInner {
                     epoch: self.epoch,
                     role: Role::Leader as i32,
                     leader: observer_id.to_string(),
-                    pending_epochs: vec![],
+                    pending_epochs: self.active_segment_epochs(self.epoch),
                 };
             }
         }
@@ -286,6 +286,14 @@ impl StreamInner {
             leader: self.leader.as_ref().cloned().unwrap_or_default(),
             pending_epochs: vec![],
         }
+    }
+
+    fn active_segment_epochs(&self, ignore: u32) -> Vec<u32> {
+        self.segments
+            .iter()
+            .filter(|(&epoch, info)| info.state == SegmentState::Appending && epoch != ignore)
+            .map(|(&epoch, _)| epoch)
+            .collect()
     }
 }
 
