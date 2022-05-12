@@ -231,6 +231,11 @@ impl StreamStateMachine {
             self.advance();
             self.all_replicates_broadcast();
             self.ready.acked_seq = self.replicate.acked_seq();
+            tracing::info!(
+                "collect ready: acked seq epoch {} index {}",
+                self.ready.acked_seq.epoch,
+                self.ready.acked_seq.index
+            );
             Some(std::mem::take(&mut self.ready))
         } else {
             None
@@ -357,6 +362,10 @@ impl StreamStateMachine {
         );
 
         self.recovering_replicates.remove(&seg_epoch);
+        if self.recovering_replicates.is_empty() {
+            info!("{} all epochs are recovered", self);
+            self.replicate.previous_epoch_are_acked();
+        }
     }
 
     fn try_to_finish_recovering(stream_id: u64, ready: &mut Ready, replicate: &Replicate) {

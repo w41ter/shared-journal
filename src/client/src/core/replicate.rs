@@ -147,6 +147,12 @@ impl Replicate {
         }
     }
 
+    pub fn previous_epoch_are_acked(&mut self) {
+        if self.acked_seq == Sequence::default() {
+            self.acked_seq = Sequence::new(self.epoch_info.segment, 0);
+        }
+    }
+
     fn replicate(&mut self) -> Vec<Mutate> {
         let mut pending_writes = vec![];
         for (server_id, progress) in &mut self.copy_set {
@@ -246,6 +252,7 @@ impl Replicate {
     }
 
     pub fn handle_received(&mut self, target: &str, matched_index: u32, acked_index: u32) {
+        debug_assert!(matched_index < self.mem_store.next_index());
         if let Some(progress) = self.copy_set.get_mut(target) {
             progress.on_received(matched_index, acked_index);
         }

@@ -386,6 +386,7 @@ impl StreamMixin {
         };
 
         waiter.await?;
+        println!("response continuously index {}, acked index {}", index, acked_index);
         Ok((index, acked_index))
     }
 

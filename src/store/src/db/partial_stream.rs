@@ -218,18 +218,35 @@ where
         let iter = self.seek(Sequence::new(epoch, 0));
         let mut last_seq: Option<Sequence> = None;
         for (seq, _) in iter {
-            if seq.epoch != epoch || seq.index != index + 1 {
-                let last_seq = last_seq.unwrap_or_default();
-                println!(
-                    "next item epoch is {}, expect epoch is {}, index is {}, continuously index is {}, last seq index {} epoch {}",
-                    seq.epoch, epoch, seq.index, index, last_seq.index, last_seq.epoch
-                );
+            if seq.epoch != epoch {
                 break;
             }
+
+            if seq.index <= index {
+                continue;
+            }
+            if seq.index != index + 1 {
+                break;
+            }
+
+            // let next_index = index + 1;
+            // if seq.index != next_index &&
+            //     !hole.contains(&next_index) {
+            //     // seq.index = 0;
+            //     // next_index = 1;
+            // }
+            // if seq.epoch != epoch || (seq.index != index + 1 && !hole.contains(&())) {
+            //     let last_seq = last_seq.unwrap_or_default();
+            //     println!(
+            //         "next item epoch is {}, expect epoch is {}, index is {}, continuously
+            // index is {}, last seq index {} epoch {}",         seq.epoch,
+            // epoch, seq.index, index, last_seq.index, last_seq.epoch     );
+            //     break;
+            // }
             index += 1;
             last_seq = Some(*seq);
-            if hole.start == index + 1 {
-                index = std::cmp::max(hole.end - 1, hole.start);
+            if index + 1 == hole.start {
+                index = hole.end - 1;
             }
         }
         if index == 0 && hole.start == 1 {

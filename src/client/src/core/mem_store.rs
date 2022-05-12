@@ -56,6 +56,7 @@ impl MemStore {
         let next_index = self.next_index();
         self.total_bytes += entry.size();
         self.entries.push_back((entry, self.total_bytes));
+        tracing::info!("mem store append new entry with epoch {}, index {}", self.epoch, next_index);
         Sequence::new(self.epoch, next_index)
     }
 
