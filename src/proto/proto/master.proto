@@ -14,7 +14,7 @@
 
 syntax = "proto3";
 
-package streamengine.master.v1;
+package sharedjournal.master.v1;
 
 service Master {
   rpc Tenant(TenantRequest) returns (TenantResponse) {}

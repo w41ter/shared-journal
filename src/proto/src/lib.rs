@@ -20,7 +20,7 @@ pub mod master {
     pub use v1::*;
 
     pub mod v1 {
-        tonic::include_proto!("streamengine.master.v1");
+        tonic::include_proto!("sharedjournal.master.v1");
     }
 }
 
@@ -33,7 +33,7 @@ pub mod store {
         pub use v1::*;
 
         pub mod v1 {
-            tonic::include_proto!("streamengine.store.meta.v1");
+            tonic::include_proto!("sharedjournal.store.meta.v1");
         }
     }
 
@@ -41,12 +41,12 @@ pub mod store {
         pub use v1::*;
 
         pub mod v1 {
-            tonic::include_proto!("streamengine.store.manifest.v1");
+            tonic::include_proto!("sharedjournal.store.manifest.v1");
         }
     }
 
     pub mod v1 {
-        tonic::include_proto!("streamengine.store.v1");
+        tonic::include_proto!("sharedjournal.store.v1");
     }
 }
 

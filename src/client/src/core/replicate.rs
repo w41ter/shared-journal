@@ -17,6 +17,8 @@ use std::{
     ops::Range,
 };
 
+use tracing::info;
+
 use super::{message::*, MemStore, Progress};
 use crate::{
     policy::{GroupReader, Policy as ReplicatePolicy},
@@ -149,12 +151,14 @@ impl Replicate {
         let mut pending_writes = vec![];
         for (server_id, progress) in &mut self.copy_set {
             let next_index = self.mem_store.next_index();
-            println!(
-                "server id {} matched index {} next index {} , total next index {}",
+            tracing::info!(
+                "server id {} {:?} matched index {} next index {} , total next index {}, learning state {:?}",
                 server_id,
+                self.epoch_info,
                 progress.matched_index(),
                 progress.next_index(),
-                next_index
+                next_index,
+                self.learning_state,
             );
             let (Range { start, mut end }, quota) = progress.next_chunk(next_index);
             let (acked_seq, entries, bytes) = if quota > 0
@@ -183,6 +187,7 @@ impl Replicate {
                     entries,
                 },
             );
+            info!("send write to {}", server_id);
             pending_writes.push(write);
         }
         pending_writes
@@ -286,6 +291,7 @@ impl Replicate {
             ..
         } = &mut self.learning_state
         {
+            info!(target = target, acked_index = acked_index, epoch = ?self.epoch_info, "receive sealed");
             acked_indexes.push(acked_index);
             if let Some(actual_acked_index) = self
                 .replicate_policy
@@ -364,6 +370,7 @@ impl Replicate {
     }
 }
 
+#[derive(Debug)]
 struct EpochInfo {
     segment: u32,
     writer: u32,

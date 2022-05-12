@@ -57,7 +57,6 @@ impl store_server::Store for Server {
     }
 }
 
-#[allow(unused, dead_code)]
 impl Server {
     async fn handle_mutate(&self, req: MutateRequest) -> Result<MutateResponse> {
         let mut resp = MutateResponse::default();
