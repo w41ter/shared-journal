@@ -321,6 +321,7 @@ impl Replicate {
                     if !matches!(entry, Entry::Bridge { .. }) {
                         // We must read the last one of acked entry to make sure it's not a bridge.
                         if *actual_acked_index < index {
+                            info!("learn index {} from remote", index);
                             entry.set_epoch(self.epoch_info.writer);
                             self.mem_store.append(entry);
                         }

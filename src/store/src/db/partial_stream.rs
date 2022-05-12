@@ -55,7 +55,7 @@ pub(crate) struct PartialStream<R> {
     /// All previous entries (exclusive) are not accessable.
     initial_seq: Sequence,
     /// All previous entries (inclusive) are acked.
-    acked_seq: Sequence,
+    pub acked_seq: Sequence,
 
     log_file_releaser: R,
 }
@@ -107,8 +107,8 @@ where
 
     pub fn write(
         &mut self,
-        writer_epoch: u32,
         segment_epoch: u32,
+        writer_epoch: u32,
         acked_seq: Sequence,
         first_index: u32,
         entries: Vec<Entry>,
@@ -214,23 +214,30 @@ where
     }
 
     pub fn continuously_index(&self, epoch: u32, hole: std::ops::Range<u32>) -> u32 {
-        let mut index: u32 = if hole.start == 1 {
-            debug_assert!(hole.end > 0);
-            hole.end - 1
-        } else {
-            0
-        };
+        let mut index: u32 = 0;
         let iter = self.seek(Sequence::new(epoch, 0));
+        let mut last_seq: Option<Sequence> = None;
         for (seq, _) in iter {
             if seq.epoch != epoch || seq.index != index + 1 {
+                let last_seq = last_seq.unwrap_or_default();
+                println!(
+                    "next item epoch is {}, expect epoch is {}, index is {}, continuously index is {}, last seq index {} epoch {}",
+                    seq.epoch, epoch, seq.index, index, last_seq.index, last_seq.epoch
+                );
                 break;
             }
             index += 1;
+            last_seq = Some(*seq);
             if hole.start == index + 1 {
-                index = hole.end - 1;
+                index = std::cmp::max(hole.end - 1, hole.start);
             }
         }
-        index
+        if index == 0 && hole.start == 1 {
+            debug_assert!(hole.end > 0);
+            hole.end - 1
+        } else {
+            index
+        }
     }
 }
 
@@ -380,6 +387,12 @@ where
         entries: Vec<Entry>,
     ) {
         let mut delta_table = BTreeMap::new();
+        println!(
+            "commit seg epoch {} first index {} num {}",
+            segment_epoch,
+            first_index,
+            entries.len()
+        );
         for (offset, entry) in entries.into_iter().enumerate() {
             let seq = Sequence::new(segment_epoch, first_index + offset as u32);
             delta_table.insert(seq, entry);
@@ -492,7 +505,11 @@ impl<'a> std::iter::Iterator for MemTableIter<'a> {
                         continue;
                     }
                     Ordering::Greater => {
-                        if !cached.as_ref().map(|(s, _)| *s <= *seq).unwrap_or_default() {
+                        if !cached
+                            .as_ref()
+                            .map(|(s, _)| **s <= **seq)
+                            .unwrap_or_default()
+                        {
                             cached = Some((*seq, entry));
                         }
                         break;
@@ -689,6 +706,16 @@ mod tests {
                 acked_seq: Sequence::new(EPOCH + 1, 1),
                 expects: Some(range(START_INDEX, 50)),
                 require_acked: true,
+            },
+            TestCase {
+                tips: "7. allow all entries if end of stream is reached",
+                input: vec![
+                    (Sequence::new(EPOCH, START_INDEX), 100),
+                    (Sequence::new(EPOCH + 1, 10), 100),
+                ],
+                acked_seq: Sequence::new(EPOCH, START_INDEX + 50),
+                expects: Some(range(START_INDEX, 100)),
+                require_acked: false,
             },
         ];
 

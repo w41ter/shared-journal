@@ -370,6 +370,14 @@ impl StreamMixin {
                 .storage
                 .continuously_index(seg_epoch, first_index..(first_index + num_entries));
             let acked_index = core.storage.acked_index(seg_epoch);
+            debug_assert!(
+                acked_index <= continuously_index,
+                "acked index {}, matched index {}, incoming acked seq {}, acked seq {}",
+                acked_index,
+                continuously_index,
+                acked_seq,
+                core.storage.acked_seq
+            );
             (
                 continuously_index,
                 acked_index,

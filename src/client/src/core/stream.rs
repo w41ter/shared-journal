@@ -360,11 +360,6 @@ impl StreamStateMachine {
     }
 
     fn try_to_finish_recovering(stream_id: u64, ready: &mut Ready, replicate: &Replicate) {
-        info!(
-            "try to finish recovering: {:?}, enough {}",
-            ready.restored_segment,
-            replicate.is_enough_targets_acked()
-        );
         if ready.restored_segment.is_none() && replicate.is_enough_targets_acked() {
             info!(
                 "stream {} segment {} is recovered, now make it sealed",

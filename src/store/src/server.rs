@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ops::Index;
+
 use components_metrics::store::*;
 use shared_journal_proto::*;
 use tonic::{async_trait, Request, Response, Status};
@@ -106,10 +108,11 @@ impl Server {
         STORE_RPC_WRITE_QPS.inc();
         STORE_RECEIVED_ENTRIES_TOTAL.inc_by(req.entries.len() as u64);
         println!(
-            "receive write request, epoch {}, index {}, {} entries",
+            "receive write request, epoch {}, index {}, {} entries, acked index {}",
             req.segment_epoch,
             req.first_index,
-            req.entries.len()
+            req.entries.len(),
+            crate::Sequence::from(req.acked_seq).index,
         );
         let (matched_index, acked_index) = self
             .db
